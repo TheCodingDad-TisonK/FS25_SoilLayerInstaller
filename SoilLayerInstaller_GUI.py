@@ -8,7 +8,7 @@ import os, re, shutil, zipfile, threading, datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -414,10 +414,23 @@ def run_installer_zip(sg, log, force=False):
             log("INFO", "Map is already patched — nothing to do.")
             return True, "already_patched"
 
-        if BLANK_GRLE_SOURCE not in z.namelist():
-            raise RuntimeError(f"Template GRLE not found inside ZIP:\n{BLANK_GRLE_SOURCE}")
-        blank    = z.read(BLANK_GRLE_SOURCE)
-        log("DEBUG", f"GRLE template : {len(blank):,} bytes")
+        blank = None
+        if BLANK_GRLE_SOURCE in z.namelist():
+            blank = z.read(BLANK_GRLE_SOURCE)
+            log("DEBUG", f"GRLE template : {BLANK_GRLE_SOURCE} ({len(blank):,} bytes)")
+        else:
+            # Fallback: use any .grle found in maps/data/ as the blank template
+            for entry in z.namelist():
+                if entry.startswith("maps/data/") and entry.endswith(".grle"):
+                    blank = z.read(entry)
+                    log("WARNING", f"Primary GRLE template not found — using fallback: {entry}")
+                    break
+        if blank is None:
+            raise RuntimeError(
+                "No GRLE template found inside the map ZIP.\n\n"
+                "The installer needs any .grle file from maps/data/ to use as a blank "
+                "template for the new soil layers. This map does not appear to have one.\n\n"
+                "Please open a GitHub issue with your map name and we will investigate.")
         snapshot = {item: z.read(item) for item in z.namelist()}
 
     bp = zip_path + ".backup_soilinstaller"

@@ -9,7 +9,7 @@ HOW IT WORKS
   2. Backs up the original zip.
   3. Patches maps/mapEU.i3d inside the zip:
        - Adds 5 File entries for the new GRLE data files.
-       - Adds 5 InfoLayer entries (soilN / soilP / soilK / soilPH / soilOM).
+       - Adds 8 InfoLayer entries (soilN / soilP / soilK / soilPH / soilOM / soilPest / soilDisease / soilCompaction).
   4. Copies an existing blank GRLE from the zip as the initial data for
      each new layer (all zeros = safe starting state).
   5. On the next game load the engine auto-creates/registers the layers.
@@ -47,11 +47,17 @@ SAVES_DIR = os.path.join(_DOCS, "My Games", "FarmingSimulator2025")
 
 # The 5 soil layers we inject.  Name = i3d short name (engine prefixes infoLayer_).
 SOIL_LAYERS = [
-    {"name": "soilN",  "field": "nitrogen",      "numChannels": 8},
-    {"name": "soilP",  "field": "phosphorus",     "numChannels": 8},
-    {"name": "soilK",  "field": "potassium",      "numChannels": 8},
-    {"name": "soilPH", "field": "pH",             "numChannels": 8},
-    {"name": "soilOM", "field": "organicMatter",  "numChannels": 8},
+    # Nutrients
+    {"name": "soilN",          "field": "nitrogen",        "numChannels": 8},
+    {"name": "soilP",          "field": "phosphorus",      "numChannels": 8},
+    {"name": "soilK",          "field": "potassium",       "numChannels": 8},
+    {"name": "soilPH",         "field": "pH",              "numChannels": 8},
+    {"name": "soilOM",         "field": "organicMatter",   "numChannels": 8},
+    # Biotic / physical pressure
+    {"name": "soilPest",       "field": "pestPressure",    "numChannels": 8},
+    {"name": "soilDisease",    "field": "diseasePressure", "numChannels": 8},
+    {"name": "soilCompaction", "field": "compaction",      "numChannels": 8},
+    # weed: read-only from game's native weed density map — not installed here
 ]
 
 # We copy this existing blank GRLE as the template for each new layer.
@@ -290,17 +296,17 @@ def main():
 
     print()
     if ok:
-        print("SUCCESS — all 5 soil layers injected.")
+        print("SUCCESS — all 8 soil layers injected.")
         print()
         print("NEXT STEPS:")
         print("  1. Reload FS25 (or load your savegame).")
         print("  2. The engine registers the layers on terrain load.")
         print("  3. Check log.txt for '[SoilFertilizer] Soil layer registered: soilN'")
-        print("     (and soilP, soilK, soilPH, soilOM).")
+        print("     (and soilP, soilK, soilPH, soilOM, soilPest, soilDisease, soilCompaction).")
         print("  4. If you see those messages, per-pixel soil tracking is active!")
         print()
         print("NOTE: FS25_SoilFertilizer must be built with short layer names")
-        print("  (soilN / soilP / soilK / soilPH / soilOM) for detection to work.")
+        print("  (soilN / soilP / soilK / soilPH / soilOM / soilPest / soilDisease / soilCompaction) for detection to work.")
     else:
         print("PARTIAL SUCCESS — some layers may be missing. Check warnings above.")
 

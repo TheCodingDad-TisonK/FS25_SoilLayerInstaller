@@ -51,6 +51,104 @@ DOCS      = _get_documents()
 DEF_SAVES = os.path.join(DOCS, "My Games", "FarmingSimulator2025")
 DEF_MODS  = os.path.join(DOCS, "My Games", "FarmingSimulator2025", "mods")
 
+# ── FS25 game installation detection ──────────────────────────────────────────
+
+def find_game_dir():
+    """Find FS25 installation directory via registry, Steam libraries, and common paths."""
+    try:
+        import winreg
+        for reg_path in [
+            r"SOFTWARE\GIANTS Software GmbH\FarmingSimulator2025",
+            r"SOFTWARE\WOW6432Node\GIANTS Software GmbH\FarmingSimulator2025",
+        ]:
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path)
+                val, _ = winreg.QueryValueEx(key, "InstallPath")
+                winreg.CloseKey(key)
+                if val and os.path.isdir(val):
+                    return val
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Steam — find all library paths via libraryfolders.vdf
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam")
+        steam_path, _ = winreg.QueryValueEx(key, "InstallPath")
+        winreg.CloseKey(key)
+        lib_paths = [steam_path]
+        vdf = os.path.join(steam_path, "steamapps", "libraryfolders.vdf")
+        if os.path.exists(vdf):
+            with open(vdf, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    m = re.search(r'"path"\s+"([^"]+)"', line)
+                    if m:
+                        lib_paths.append(m.group(1).replace("\\\\", "\\"))
+        for lib in lib_paths:
+            p = os.path.join(lib, "steamapps", "common", "Farming Simulator 25")
+            if os.path.isdir(p):
+                return p
+    except Exception:
+        pass
+
+    for p in [
+        r"C:\Program Files (x86)\Farming Simulator 2025",
+        r"C:\Program Files\Farming Simulator 2025",
+        r"C:\Games\Farming Simulator 2025",
+    ]:
+        if os.path.isdir(p):
+            return p
+    return None
+
+DEF_GAME_DIR = find_game_dir()
+
+# Known base-game mapId prefixes → folder name inside {game_dir}/data/maps/
+KNOWN_BASE_MAPS = {
+    "MapUS":     "mapUS",
+    "MapEU":     "mapEU",
+    "MapAlpine": "mapAlpine",
+    "MapCA":     "mapCA",
+    "MapFR":     "mapFR",
+}
+
+def find_base_game_map(map_id, game_dir):
+    """
+    For non-mod (base game) maps, locate the i3d file in the FS25 install dir.
+    Returns {"i3d_path": str, "data_dir": str} or None.
+    """
+    if not game_dir or not os.path.isdir(game_dir):
+        return None
+    map_short = map_id.split(".")[0]
+    maps_root = os.path.join(game_dir, "data", "maps")
+
+    # Candidate folder names in priority order
+    candidates = []
+    if map_short in KNOWN_BASE_MAPS:
+        candidates.append(KNOWN_BASE_MAPS[map_short])
+    candidates += [
+        map_short[0].lower() + map_short[1:],  # MapUS → mapUS
+        map_short.lower(),                       # MapUS → mapus
+        map_short,                               # as-is
+    ]
+    # Deduplicate while preserving order
+    seen = set()
+    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    for folder in candidates:
+        # Structure 1: {maps_root}/{folder}/{folder}.i3d
+        i3d = os.path.join(maps_root, folder, folder + ".i3d")
+        if os.path.exists(i3d):
+            return {"i3d_path": i3d,
+                    "data_dir": os.path.join(maps_root, folder, "data")}
+        # Structure 2: flat — {maps_root}/{folder}.i3d
+        i3d = os.path.join(maps_root, folder + ".i3d")
+        if os.path.exists(i3d):
+            return {"i3d_path": i3d,
+                    "data_dir": os.path.join(maps_root, "data")}
+    return None
+
 # ── Soil layer definitions ─────────────────────────────────────────────────────
 SOIL_LAYERS = [
     {"name": "soilN",  "numChannels": 8},
@@ -61,7 +159,7 @@ SOIL_LAYERS = [
 ]
 BLANK_GRLE_SOURCE = "maps/data/infoLayer_fieldType.grle"
 
-# ── Core installer logic (UNCHANGED) ──────────────────────────────────────────
+# ── Core patching helpers (UNCHANGED) ─────────────────────────────────────────
 
 def find_map_id(savegame_dir):
     career = os.path.join(savegame_dir, "careerSavegame.xml")
@@ -123,9 +221,9 @@ def patch_infolayer_section(i3d_content, new_layers):
     )
     return i3d_content[:insert_pos] + insert + i3d_content[insert_pos:]
 
-# ── Scanner (new) ─────────────────────────────────────────────────────────────
+# ── Scanner ────────────────────────────────────────────────────────────────────
 
-def scan_savegames(saves_dir, mods_dir, log):
+def scan_savegames(saves_dir, mods_dir, game_dir, log):
     """Return a list of dicts — one per found savegame slot."""
     results = []
     for i in range(1, 21):
@@ -142,54 +240,167 @@ def scan_savegames(saves_dir, mods_dir, log):
             log("WARNING", f"  Could not read map ID: {e}")
             map_id = None
 
-        map_name = map_id.split(".")[0] if map_id else "Unknown"
-        zip_path = None
+        map_name    = map_id.split(".")[0] if map_id else "Unknown"
+        zip_path    = None
+        is_base     = False
+        game_i3d    = None
+        game_data   = None
+        patched     = None
+        has_backup  = False
+        backup_path = None
+
         if map_id:
+            # 1. Try mod ZIP first
             try:
                 zip_path = find_map_zip(map_id, mods_dir)
                 log("DEBUG", f"  map={map_name}  zip={'found' if zip_path else 'NOT FOUND'}")
             except Exception as e:
                 log("WARNING", f"  ZIP lookup error: {e}")
 
-        patched    = None
-        has_backup = False
-        if zip_path:
-            backup = zip_path + ".backup_soilinstaller"
-            has_backup = os.path.exists(backup)
-            try:
-                with zipfile.ZipFile(zip_path, "r") as z:
-                    i3d = find_i3d_path(z)
-                    if i3d:
-                        raw = z.read(i3d).decode("utf-8-sig", errors="ignore")
+            if zip_path:
+                bp = zip_path + ".backup_soilinstaller"
+                has_backup  = os.path.exists(bp)
+                backup_path = bp
+                try:
+                    with zipfile.ZipFile(zip_path, "r") as z:
+                        i3d = find_i3d_path(z)
+                        if i3d:
+                            raw     = z.read(i3d).decode("utf-8-sig", errors="ignore")
+                            patched = already_patched(raw)
+                            log("DEBUG", f"  i3d={i3d}  patched={patched}  backup={has_backup}")
+                except Exception as e:
+                    log("WARNING", f"  Could not inspect ZIP: {e}")
+            else:
+                # 2. Fall back to base game map detection
+                info = find_base_game_map(map_id, game_dir)
+                if info:
+                    is_base    = True
+                    game_i3d   = info["i3d_path"]
+                    game_data  = info["data_dir"]
+                    bp         = game_i3d + ".backup_soilinstaller"
+                    has_backup  = os.path.exists(bp)
+                    backup_path = bp
+                    try:
+                        with open(game_i3d, encoding="utf-8-sig", errors="ignore") as f:
+                            raw     = f.read()
                         patched = already_patched(raw)
-                        log("DEBUG", f"  i3d={i3d}  patched={patched}  backup={has_backup}")
-            except Exception as e:
-                log("WARNING", f"  Could not inspect ZIP: {e}")
+                        log("DEBUG", f"  base game i3d found  patched={patched}")
+                    except Exception as e:
+                        log("WARNING", f"  Could not read base game i3d: {e}")
+                else:
+                    log("DEBUG", f"  No ZIP and no base game map found for {map_name}")
 
         results.append({
-            "slot":        i,
-            "slot_name":   f"savegame{i}",
-            "sg_path":     sg_path,
-            "map_id":      map_id,
-            "map_name":    map_name,
-            "zip_path":    zip_path,
-            "zip_name":    os.path.basename(zip_path) if zip_path else None,
-            "patched":     patched,
-            "has_backup":  has_backup,
-            "backup_path": (zip_path + ".backup_soilinstaller") if zip_path else None,
+            "slot":         i,
+            "slot_name":    f"savegame{i}",
+            "sg_path":      sg_path,
+            "map_id":       map_id,
+            "map_name":     map_name,
+            "zip_path":     zip_path,
+            "zip_name":     os.path.basename(zip_path) if zip_path else None,
+            "is_base_game": is_base,
+            "game_i3d":     game_i3d,
+            "game_data_dir": game_data,
+            "patched":      patched,
+            "has_backup":   has_backup,
+            "backup_path":  backup_path,
         })
     return results
 
-# ── Installer runner (accepts sg dict + log callback) ─────────────────────────
+# ── Base-game installer (patches loose files directly) ────────────────────────
 
-def run_installer(sg, log, force=False):
-    if not sg["zip_path"]:
+def run_installer_base_game(sg, log, force=False):
+    i3d_path = sg["game_i3d"]
+    data_dir = sg["game_data_dir"]
+
+    log("INFO", f"Savegame : {sg['slot_name']}")
+    log("INFO", f"Map      : {sg['map_name']} (base game)")
+    log("INFO", f"i3d      : {i3d_path}")
+
+    with open(i3d_path, encoding="utf-8-sig", errors="ignore") as f:
+        raw = f.read()
+
+    if already_patched(raw) and not force:
+        log("INFO", "Map is already patched — nothing to do.")
+        return True, "already_patched"
+
+    # Find blank GRLE template in game data directory
+    blank = None
+    grle_template = os.path.join(data_dir, "infoLayer_fieldType.grle")
+    if os.path.exists(grle_template):
+        with open(grle_template, "rb") as f:
+            blank = f.read()
+        log("DEBUG", f"GRLE template : {os.path.basename(grle_template)} ({len(blank):,} bytes)")
+    else:
+        # Fallback: any .grle in data dir
+        if os.path.isdir(data_dir):
+            for fn in sorted(os.listdir(data_dir)):
+                if fn.endswith(".grle"):
+                    with open(os.path.join(data_dir, fn), "rb") as f:
+                        blank = f.read()
+                    log("DEBUG", f"GRLE template (fallback): {fn} ({len(blank):,} bytes)")
+                    break
+    if blank is None:
         raise RuntimeError(
-            f"Map ZIP not found for '{sg['map_id']}'.\n\n"
-            "Make sure the map mod is installed in your Mods folder.")
+            f"Could not find a GRLE template in:\n{data_dir}\n\n"
+            "Make sure the FS25 game installation path is correct in Settings.")
 
-    log("INFO",  f"Savegame : {sg['slot_name']}")
-    log("INFO",  f"Map ZIP  : {sg['zip_name']}")
+    # Backup i3d
+    bp = i3d_path + ".backup_soilinstaller"
+    if not os.path.exists(bp):
+        shutil.copy2(i3d_path, bp)
+        log("INFO", f"Backup   : {os.path.basename(bp)}")
+    else:
+        log("DEBUG", "Backup already exists — skipping.")
+
+    # Patch
+    max_fid = get_max_file_id(raw)
+    log("DEBUG", f"Max existing fileId: {max_fid}")
+    fe, le = [], []
+    for idx, layer in enumerate(SOIL_LAYERS):
+        fid  = max_fid + 1 + idx
+        name = layer["name"]
+        nc   = layer["numChannels"]
+        fe.append((fid, f"data/infoLayer_{name}.grle"))
+        le.append((name, fid, nc))
+
+    log("INFO", f"Adding {len(SOIL_LAYERS)} layers (IDs {max_fid+1}–{max_fid+len(SOIL_LAYERS)}):")
+    for name, fid, _ in le:
+        log("INFO", f"  + {name}  (id={fid})")
+
+    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le)
+
+    with open(i3d_path, "w", encoding="utf-8") as f:
+        f.write(patched_i3d)
+    log("DEBUG", "i3d updated.")
+
+    # Write blank GRLE files
+    os.makedirs(data_dir, exist_ok=True)
+    for layer in SOIL_LAYERS:
+        grle_path = os.path.join(data_dir, f"infoLayer_{layer['name']}.grle")
+        with open(grle_path, "wb") as f:
+            f.write(blank)
+        log("DEBUG", f"  + {os.path.basename(grle_path)}")
+
+    # Verify
+    log("INFO", "Verifying…")
+    ok = True
+    with open(i3d_path, encoding="utf-8-sig", errors="ignore") as f:
+        check = f.read()
+    for layer in SOIL_LAYERS:
+        n    = layer["name"]
+        grle = os.path.join(data_dir, f"infoLayer_{n}.grle")
+        good = (f'name="{n}"' in check) and os.path.exists(grle)
+        log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
+        if not good:
+            ok = False
+    return ok, "patched"
+
+# ── Mod-map installer (ZIP-based) ─────────────────────────────────────────────
+
+def run_installer_zip(sg, log, force=False):
+    log("INFO", f"Savegame : {sg['slot_name']}")
+    log("INFO", f"Map ZIP  : {sg['zip_name']}")
     zip_path = sg["zip_path"]
 
     with zipfile.ZipFile(zip_path, "r") as z:
@@ -205,7 +416,7 @@ def run_installer(sg, log, force=False):
 
         if BLANK_GRLE_SOURCE not in z.namelist():
             raise RuntimeError(f"Template GRLE not found inside ZIP:\n{BLANK_GRLE_SOURCE}")
-        blank = z.read(BLANK_GRLE_SOURCE)
+        blank    = z.read(BLANK_GRLE_SOURCE)
         log("DEBUG", f"GRLE template : {len(blank):,} bytes")
         snapshot = {item: z.read(item) for item in z.namelist()}
 
@@ -219,8 +430,8 @@ def run_installer(sg, log, force=False):
     max_fid = get_max_file_id(raw)
     log("DEBUG", f"Max existing fileId: {max_fid}")
     fe, le, gf = [], [], {}
-    for i, layer in enumerate(SOIL_LAYERS):
-        fid  = max_fid + 1 + i
+    for idx, layer in enumerate(SOIL_LAYERS):
+        fid  = max_fid + 1 + idx
         name = layer["name"]
         nc   = layer["numChannels"]
         fe.append((fid, f"data/infoLayer_{name}.grle"))
@@ -257,6 +468,17 @@ def run_installer(sg, log, force=False):
                 ok = False
     return ok, "patched"
 
+# ── Dispatcher ────────────────────────────────────────────────────────────────
+
+def run_installer(sg, log, force=False):
+    if sg.get("is_base_game"):
+        return run_installer_base_game(sg, log, force)
+    if not sg["zip_path"]:
+        raise RuntimeError(
+            f"Map ZIP not found for '{sg['map_id']}'.\n\n"
+            "Make sure the map mod is installed in your Mods folder.")
+    return run_installer_zip(sg, log, force)
+
 
 # ── GUI Application ────────────────────────────────────────────────────────────
 
@@ -271,6 +493,7 @@ class InstallerApp(tk.Tk):
         # Runtime state
         self._saves_dir = DEF_SAVES
         self._mods_dir  = DEF_MODS
+        self._game_dir  = DEF_GAME_DIR
         self._savegames = []
         self._selected  = None
         self._scanning  = False
@@ -281,8 +504,10 @@ class InstallerApp(tk.Tk):
         self._force_patch  = tk.BooleanVar(value=False)
         self._ov_saves     = tk.BooleanVar(value=False)
         self._ov_mods      = tk.BooleanVar(value=False)
+        self._ov_game      = tk.BooleanVar(value=False)
         self._custom_saves = tk.StringVar(value=DEF_SAVES)
         self._custom_mods  = tk.StringVar(value=DEF_MODS)
+        self._custom_game  = tk.StringVar(value=DEF_GAME_DIR or "")
 
         self._setup_style()
         self._build_ui()
@@ -353,9 +578,9 @@ class InstallerApp(tk.Tk):
         tab = tk.Frame(self._nb, bg=BG)
         self._nb.add(tab, text="  Installer  ")
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(1, weight=1)   # tree grows
+        tab.rowconfigure(1, weight=1)
 
-        # ── Scanner header row
+        # Scanner header row
         sh = tk.Frame(tab, bg=BG)
         sh.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
         tk.Label(sh, text="Savegames", font=H2, bg=BG, fg=TEXT).pack(side="left")
@@ -366,7 +591,7 @@ class InstallerApp(tk.Tk):
             command=self._do_scan)
         self._btn_scan.pack(side="right")
 
-        # ── Treeview
+        # Treeview
         tf = tk.Frame(tab, bg=SURFACE,
                       highlightthickness=1, highlightbackground=BORDER)
         tf.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 0))
@@ -388,13 +613,14 @@ class InstallerApp(tk.Tk):
         self._tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
-        self._tree.tag_configure("patched", foreground=GREEN)
-        self._tree.tag_configure("ready",   foreground=BLUE)
-        self._tree.tag_configure("no_zip",  foreground=YELLOW)
-        self._tree.tag_configure("unknown", foreground=DIM)
+        self._tree.tag_configure("patched",   foreground=GREEN)
+        self._tree.tag_configure("ready",     foreground=BLUE)
+        self._tree.tag_configure("no_zip",    foreground=YELLOW)
+        self._tree.tag_configure("base_game", foreground=BLUE)
+        self._tree.tag_configure("unknown",   foreground=DIM)
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
-        # ── Info card (updates on selection)
+        # Info card
         self._info_frame = tk.Frame(tab, bg=PANEL, padx=16, pady=10)
         self._info_frame.grid(row=2, column=0, sticky="ew", padx=18, pady=(8, 0))
         self._info_frame.columnconfigure(1, weight=1)
@@ -403,7 +629,7 @@ class InstallerApp(tk.Tk):
             font=BD, bg=PANEL, fg=DIM)
         self._info_placeholder.grid(row=0, column=0, columnspan=3, pady=6)
 
-        # ── Progress bar + Run button
+        # Progress bar + Run button
         bf = tk.Frame(tab, bg=BG)
         bf.grid(row=3, column=0, sticky="ew", padx=18, pady=(10, 16))
         bf.columnconfigure(0, weight=1)
@@ -430,7 +656,7 @@ class InstallerApp(tk.Tk):
         r = 0
         pad = dict(padx=18, pady=5)
 
-        # ── Detected paths (read-only display)
+        # Detected paths (read-only)
         tk.Label(tab, text="Auto-Detected Paths", font=H2,
                  bg=BG, fg=TEXT).grid(row=r, column=0, sticky="w",
                                        padx=18, pady=(16, 4))
@@ -438,63 +664,64 @@ class InstallerApp(tk.Tk):
         pf = tk.Frame(tab, bg=PANEL, padx=14, pady=10)
         pf.grid(row=r, column=0, sticky="ew", **pad)
         pf.columnconfigure(1, weight=1)
-        docs_short = DOCS if len(DOCS) <= 52 else "…" + DOCS[-49:]
-        for i, (lbl, val) in enumerate([
-            ("Documents :", docs_short),
-            ("Saves dir :", DEF_SAVES if len(DEF_SAVES) <= 52 else "…" + DEF_SAVES[-49:]),
-            ("Mods dir  :", DEF_MODS  if len(DEF_MODS)  <= 52 else "…" + DEF_MODS[-49:]),
-        ]):
+
+        def _short(p, n=52):
+            return p if len(p) <= n else "…" + p[-n+1:] if p else "Not detected"
+
+        game_disp = _short(DEF_GAME_DIR) if DEF_GAME_DIR else "Not detected"
+        game_color = TEXT if DEF_GAME_DIR else YELLOW
+        path_rows = [
+            ("Documents :", _short(DOCS),         TEXT),
+            ("Saves dir :", _short(DEF_SAVES),     TEXT),
+            ("Mods dir  :", _short(DEF_MODS),      TEXT),
+            ("Game dir  :", game_disp,              game_color),
+        ]
+        for i, (lbl, val, col) in enumerate(path_rows):
             tk.Label(pf, text=lbl, font=H3, bg=PANEL, fg=SUBTEXT,
                      anchor="e", width=13).grid(row=i, column=0, sticky="e", pady=3)
-            tk.Label(pf, text=val, font=SM, bg=PANEL, fg=TEXT,
+            tk.Label(pf, text=val, font=SM, bg=PANEL, fg=col,
                      anchor="w").grid(row=i, column=1, sticky="w", padx=8)
         r += 1
 
-        # ── Override paths
+        # Override paths
         tk.Label(tab, text="Override Paths", font=H2,
                  bg=BG, fg=TEXT).grid(row=r, column=0, sticky="w",
                                        padx=18, pady=(10, 4))
         r += 1
         of = tk.Frame(tab, bg=PANEL, padx=14, pady=10)
         of.grid(row=r, column=0, sticky="ew", **pad)
-        of.columnconfigure(1, weight=1)
+        of.columnconfigure(0, weight=1)
 
-        # Saves override
-        self._saves_entry = tk.Entry(of, textvariable=self._custom_saves,
-            font=SM, bg=SURFACE, fg=DIM, insertbackground=TEXT,
-            relief="flat", state="disabled",
-            disabledbackground=SURFACE, disabledforeground=DIM)
-        self._saves_browse_btn = tk.Button(of, text="Browse", font=SM,
-            bg=OVERLAY, fg=DIM, activebackground=BORDER,
-            relief="flat", state="disabled", padx=8, pady=4,
-            command=lambda: self._browse("saves"))
-        ttk.Checkbutton(of, text="  Override Saves directory",
-                        variable=self._ov_saves,
-                        command=lambda: self._toggle_override(
-                            self._ov_saves, self._saves_entry, self._saves_browse_btn)
-                        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        self._saves_entry.grid(row=1, column=0, sticky="ew", ipady=5, pady=(0, 8))
-        self._saves_browse_btn.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(0, 8))
+        def _make_override(parent, row_cb, row_entry, label, sv, ov_var, browse_key):
+            entry = tk.Entry(parent, textvariable=sv,
+                font=SM, bg=SURFACE, fg=DIM, insertbackground=TEXT,
+                relief="flat", state="disabled",
+                disabledbackground=SURFACE, disabledforeground=DIM)
+            btn = tk.Button(parent, text="Browse", font=SM,
+                bg=OVERLAY, fg=DIM, activebackground=BORDER,
+                relief="flat", state="disabled", padx=8, pady=4,
+                command=lambda: self._browse(browse_key))
+            ttk.Checkbutton(parent, text=f"  {label}",
+                            variable=ov_var,
+                            command=lambda: self._toggle_override(ov_var, entry, btn)
+                            ).grid(row=row_cb, column=0, columnspan=2,
+                                   sticky="w", pady=(4, 2))
+            entry.grid(row=row_entry, column=0, sticky="ew", ipady=5, pady=(0, 8))
+            btn.grid(row=row_entry, column=1, sticky="w", padx=(6, 0), pady=(0, 8))
+            return entry, btn
 
-        # Mods override
-        self._mods_entry = tk.Entry(of, textvariable=self._custom_mods,
-            font=SM, bg=SURFACE, fg=DIM, insertbackground=TEXT,
-            relief="flat", state="disabled",
-            disabledbackground=SURFACE, disabledforeground=DIM)
-        self._mods_browse_btn = tk.Button(of, text="Browse", font=SM,
-            bg=OVERLAY, fg=DIM, activebackground=BORDER,
-            relief="flat", state="disabled", padx=8, pady=4,
-            command=lambda: self._browse("mods"))
-        ttk.Checkbutton(of, text="  Override Mods directory",
-                        variable=self._ov_mods,
-                        command=lambda: self._toggle_override(
-                            self._ov_mods, self._mods_entry, self._mods_browse_btn)
-                        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        self._mods_entry.grid(row=3, column=0, sticky="ew", ipady=5, pady=(0, 4))
-        self._mods_browse_btn.grid(row=3, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
+        self._saves_entry, self._saves_browse_btn = _make_override(
+            of, 0, 1, "Override Saves directory",
+            self._custom_saves, self._ov_saves, "saves")
+        self._mods_entry, self._mods_browse_btn = _make_override(
+            of, 2, 3, "Override Mods directory",
+            self._custom_mods, self._ov_mods, "mods")
+        self._game_entry, self._game_browse_btn = _make_override(
+            of, 4, 5, "Override Game installation directory",
+            self._custom_game, self._ov_game, "game")
         r += 1
 
-        # ── Options
+        # Options
         tk.Label(tab, text="Options", font=H2,
                  bg=BG, fg=TEXT).grid(row=r, column=0, sticky="w",
                                        padx=18, pady=(10, 4))
@@ -511,7 +738,7 @@ class InstallerApp(tk.Tk):
             command=self._refresh_run_btn).pack(anchor="w", pady=4)
         r += 1
 
-        # ── Apply button
+        # Apply button
         tk.Button(tab, text="Apply & Re-scan",
             font=("Segoe UI", 10, "bold"), bg=BLUE, fg=BG,
             activebackground="#7aa2f7", activeforeground=BG,
@@ -527,7 +754,6 @@ class InstallerApp(tk.Tk):
         tab.rowconfigure(1, weight=1)
         tab.columnconfigure(0, weight=1)
 
-        # Toolbar
         tb = tk.Frame(tab, bg=PANEL, pady=7)
         tb.grid(row=0, column=0, columnspan=2, sticky="ew")
         for txt, cmd in [("Copy All", self._log_copy),
@@ -543,7 +769,6 @@ class InstallerApp(tk.Tk):
         tk.Frame(tab, bg=BORDER, height=1).grid(row=0, column=0,
                                                   columnspan=2, sticky="sew")
 
-        # Log text widget
         self._log_txt = tk.Text(tab, font=MN, bg=SURFACE, fg=TEXT,
                                  insertbackground=TEXT, relief="flat",
                                  state="disabled", wrap="word",
@@ -619,10 +844,12 @@ class InstallerApp(tk.Tk):
         """Return (display_string, tag_name) for a savegame dict."""
         if sg["patched"] is True:
             return ("✓  Patched", "patched")
-        if sg["zip_path"] is None:
-            return ("✗  No ZIP",  "no_zip")
-        if sg["patched"] is False:
+        if sg.get("is_base_game"):
+            return ("○  Ready",   "base_game")
+        if sg["zip_path"] is not None and sg["patched"] is False:
             return ("○  Ready",   "ready")
+        if sg["zip_path"] is None and not sg.get("is_base_game"):
+            return ("✗  No ZIP",  "no_zip")
         return ("?  Unknown", "unknown")
 
     def _populate_tree(self, savegames):
@@ -666,15 +893,36 @@ class InstallerApp(tk.Tk):
                      ).grid(row=0, column=0, columnspan=3, pady=6)
             return
 
-        rows = [
-            ("Slot",   sg["slot_name"],                            TEXT),
-            ("Map",    sg["map_name"],                             TEXT),
-            ("ZIP",    sg["zip_name"] or "Not found in Mods folder", YELLOW if not sg["zip_path"] else TEXT),
-            ("Status", self._status_for(sg)[0].strip(),
-                       GREEN if sg["patched"] else BLUE if sg["zip_path"] else YELLOW),
-            ("Backup", "✓ Backup exists" if sg["has_backup"] else "None yet",
-                       GREEN if sg["has_backup"] else DIM),
-        ]
+        status_str, _ = self._status_for(sg)
+
+        if sg.get("is_base_game"):
+            # Base game map — show i3d path instead of ZIP
+            i3d_short = sg["game_i3d"]
+            if i3d_short and len(i3d_short) > 52:
+                i3d_short = "…" + i3d_short[-51:]
+            rows = [
+                ("Slot",   sg["slot_name"],                    TEXT),
+                ("Map",    sg["map_name"],                     TEXT),
+                ("Type",   "Base Game Map",                    BLUE),
+                ("i3d",    i3d_short or "Not found",
+                           TEXT if sg["game_i3d"] else RED),
+                ("Status", status_str.strip(),
+                           GREEN if sg["patched"] else BLUE),
+                ("Backup", "✓ Backup exists" if sg["has_backup"] else "None yet",
+                           GREEN if sg["has_backup"] else DIM),
+            ]
+        else:
+            rows = [
+                ("Slot",   sg["slot_name"],                                       TEXT),
+                ("Map",    sg["map_name"],                                        TEXT),
+                ("ZIP",    sg["zip_name"] or "Not found in Mods folder",
+                           YELLOW if not sg["zip_path"] else TEXT),
+                ("Status", status_str.strip(),
+                           GREEN if sg["patched"] else BLUE if sg["zip_path"] else YELLOW),
+                ("Backup", "✓ Backup exists" if sg["has_backup"] else "None yet",
+                           GREEN if sg["has_backup"] else DIM),
+            ]
+
         for i, (label, value, color) in enumerate(rows):
             tk.Label(self._info_frame, text=f"{label}:", font=H3,
                      bg=PANEL, fg=SUBTEXT, anchor="e", width=8
@@ -683,7 +931,6 @@ class InstallerApp(tk.Tk):
                      bg=PANEL, fg=color, anchor="w"
                      ).grid(row=i, column=1, sticky="w")
 
-        # Restore backup button — shown inline only when backup exists
         if sg["has_backup"] and sg["backup_path"]:
             tk.Button(self._info_frame, text="Restore Backup",
                 font=SM, bg=OVERLAY, fg=YELLOW,
@@ -699,7 +946,8 @@ class InstallerApp(tk.Tk):
             self._btn_run.config(state="disabled", bg=DIM, fg=BG,
                                   text="Run Installer", cursor="arrow")
             return
-        if sg["zip_path"] is None:
+        can_run = sg["zip_path"] is not None or sg.get("is_base_game")
+        if not can_run:
             self._btn_run.config(state="disabled", bg=DIM, fg=BG,
                                   text="✗  Map ZIP Not Found", cursor="arrow")
             return
@@ -727,13 +975,15 @@ class InstallerApp(tk.Tk):
         self._set_status("Scanning savegames…", BLUE)
         self._log("INFO", f"Scanning  saves: {self._saves_dir}")
         self._log("INFO", f"          mods:  {self._mods_dir}")
+        self._log("INFO", f"          game:  {self._game_dir or 'Not detected'}")
         for item in self._tree.get_children():
             self._tree.delete(item)
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
         try:
-            results = scan_savegames(self._saves_dir, self._mods_dir, self._log)
+            results = scan_savegames(
+                self._saves_dir, self._mods_dir, self._game_dir, self._log)
             self.after(0, self._scan_done, results, None)
         except Exception as e:
             self.after(0, self._scan_done, [], str(e))
@@ -747,7 +997,8 @@ class InstallerApp(tk.Tk):
             self._log("ERROR", f"Scan failed: {error}")
             self._set_status(f"Scan error — {error}", RED)
         else:
-            ready = sum(1 for s in results if s["patched"] is False and s["zip_path"])
+            ready = sum(1 for s in results
+                        if not s["patched"] and (s["zip_path"] or s.get("is_base_game")))
             done  = sum(1 for s in results if s["patched"] is True)
             self._log("INFO", f"Found {len(results)} savegame(s) — "
                                f"{ready} ready to patch, {done} already patched")
@@ -764,7 +1015,7 @@ class InstallerApp(tk.Tk):
 
         # Auto-select first save that is ready to patch
         for sg in results:
-            if not sg["patched"] and sg["zip_path"]:
+            if not sg["patched"] and (sg["zip_path"] or sg.get("is_base_game")):
                 self._tree.selection_set(str(sg["slot"]))
                 self._tree.focus(str(sg["slot"]))
                 self._on_tree_select()
@@ -785,7 +1036,7 @@ class InstallerApp(tk.Tk):
         self._set_status("Installing…", YELLOW)
         self._log("INFO", "─" * 52)
         self._log("INFO", "Starting installer…")
-        self._nb.select(2)   # switch to Log tab
+        self._nb.select(2)
         threading.Thread(target=self._install_worker, daemon=True).start()
 
     def _install_worker(self):
@@ -818,9 +1069,9 @@ class InstallerApp(tk.Tk):
             messagebox.showwarning("Partial success",
                 "Some layers may not have been applied correctly.\n\n"
                 "Check the Log tab for details.\n"
-                "Your original ZIP was backed up before any changes.")
+                "Your original map was backed up before any changes.")
 
-        self.after(400, self._do_scan)   # refresh list after install
+        self.after(400, self._do_scan)
 
     def _install_error(self, msg):
         self._running = False
@@ -837,13 +1088,15 @@ class InstallerApp(tk.Tk):
         sg = self._selected
         if not sg or not sg["has_backup"] or not sg["backup_path"]:
             return
+        target = sg["game_i3d"] if sg.get("is_base_game") else sg["zip_path"]
+        label  = os.path.basename(sg["backup_path"])
         if not messagebox.askyesno("Restore Backup",
-                f"Restore the backup for:\n{sg['zip_name']}\n\n"
+                f"Restore the backup:\n{label}\n\n"
                 "This will undo the soil layer patch. Continue?"):
             return
         try:
-            shutil.copy2(sg["backup_path"], sg["zip_path"])
-            self._log("INFO", f"Restored backup: {os.path.basename(sg['backup_path'])}")
+            shutil.copy2(sg["backup_path"], target)
+            self._log("INFO", f"Restored backup: {label}")
             self._set_status("Backup restored successfully.", BLUE)
         except Exception as e:
             self._log("ERROR", f"Restore failed: {e}")
@@ -860,19 +1113,26 @@ class InstallerApp(tk.Tk):
         btn.config(state=state, fg=fg if var.get() else DIM)
 
     def _browse(self, key):
-        path = filedialog.askdirectory(
-            title=f"Select {'Saves' if key == 'saves' else 'Mods'} directory")
+        titles = {"saves": "Select Saves directory",
+                  "mods":  "Select Mods directory",
+                  "game":  "Select FS25 game installation directory"}
+        path = filedialog.askdirectory(title=titles.get(key, "Select directory"))
         if path:
-            (self._custom_saves if key == "saves" else self._custom_mods).set(path)
+            {"saves": self._custom_saves,
+             "mods":  self._custom_mods,
+             "game":  self._custom_game}[key].set(path)
 
     def _apply_settings(self):
         self._saves_dir = (self._custom_saves.get()
                            if self._ov_saves.get() else DEF_SAVES)
         self._mods_dir  = (self._custom_mods.get()
                            if self._ov_mods.get()  else DEF_MODS)
-        self._log("INFO", f"Settings applied.")
+        self._game_dir  = (self._custom_game.get()
+                           if self._ov_game.get()  else DEF_GAME_DIR)
+        self._log("INFO", "Settings applied.")
         self._log("INFO", f"  Saves dir: {self._saves_dir}")
         self._log("INFO", f"  Mods dir:  {self._mods_dir}")
+        self._log("INFO", f"  Game dir:  {self._game_dir or 'Not set'}")
         self._nb.select(0)
         self._do_scan()
 

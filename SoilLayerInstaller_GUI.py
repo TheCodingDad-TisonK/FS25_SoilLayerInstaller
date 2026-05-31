@@ -8,7 +8,7 @@ import os, re, shutil, zipfile, threading, datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -197,7 +197,9 @@ def find_i3d_path(z):
     return None
 
 def already_patched(i3d_content):
-    return 'name="soilN"' in i3d_content
+    # Check both InfoLayer entry AND File entry — a failed first run may have added
+    # File entries without InfoLayer entries, leaving a half-patched state.
+    return 'name="soilN"' in i3d_content or 'infoLayer_soilN.grle' in i3d_content
 
 def get_max_file_id(i3d_content):
     ids = [int(m) for m in re.findall(r'fileId="(\d+)"', i3d_content)]
@@ -211,16 +213,36 @@ def patch_files_section(i3d_content, new_files):
     return re.sub(r"(\s*</Files>)", insert + r"\1", i3d_content, count=1)
 
 def find_last_infolayer_end(i3d_content):
+    """Return (insert_pos, fallback_used) where insert_pos is where to inject new InfoLayer entries."""
+    # Preferred: insert after the last existing <InfoLayer .../> entry
     pattern = re.compile(r'<InfoLayer\b[^>]*(?:/>|>.*?</InfoLayer>)', re.DOTALL)
     last_match = None
     for m in pattern.finditer(i3d_content):
         last_match = m
-    return last_match.end() if last_match else None
+    if last_match:
+        return last_match.end(), None
 
-def patch_infolayer_section(i3d_content, new_layers):
-    insert_pos = find_last_infolayer_end(i3d_content)
+    # Fallback A: no InfoLayer entries found — insert inside TerrainTransformGroup
+    # just before its closing tag (correct parent for FS25 InfoLayer declarations)
+    m = re.search(r'</TerrainTransformGroup>', i3d_content)
+    if m:
+        return m.start(), "TerrainTransformGroup"
+
+    # Fallback B: before </Scene> as a last resort
+    m = re.search(r'</Scene>', i3d_content)
+    if m:
+        return m.start(), "Scene"
+
+    return None, None
+
+def patch_infolayer_section(i3d_content, new_layers, log=None):
+    insert_pos, fallback = find_last_infolayer_end(i3d_content)
     if insert_pos is None:
+        if log:
+            log("ERROR", "Could not find InfoLayer section or TerrainTransformGroup — InfoLayer patch skipped!")
         return i3d_content
+    if fallback and log:
+        log("WARNING", f"No existing InfoLayer entries found — inserting inside </{fallback}> as fallback")
     insert = "\n" + "\n".join(
         f'        <InfoLayer name="{name}" fileId="{fid}" numChannels="{nc}" runtime="true"/>'
         for name, fid, nc in new_layers
@@ -374,7 +396,7 @@ def run_installer_base_game(sg, log, force=False):
     for name, fid, _ in le:
         log("INFO", f"  + {name}  (id={fid})")
 
-    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le)
+    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le, log)
 
     with open(i3d_path, "w", encoding="utf-8") as f:
         f.write(patched_i3d)
@@ -467,7 +489,7 @@ def run_installer_zip(sg, log, force=False):
     for name, fid, _ in le:
         log("INFO", f"  + {name}  (id={fid})")
 
-    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le)
+    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le, log)
 
     log("INFO", "Repacking ZIP…")
     tmp = zip_path + ".tmp"

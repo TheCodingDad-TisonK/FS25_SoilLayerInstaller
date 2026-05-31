@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+build/
+dist/
+*.spec
+
+# Backups created by the installer
+*.backup_soilinstaller
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

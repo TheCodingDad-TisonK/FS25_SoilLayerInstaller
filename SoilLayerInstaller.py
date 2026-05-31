@@ -47,11 +47,17 @@ SAVES_DIR = os.path.join(_DOCS, "My Games", "FarmingSimulator2025")
 
 # The 5 soil layers we inject.  Name = i3d short name (engine prefixes infoLayer_).
 SOIL_LAYERS = [
-    {"name": "soilN",  "field": "nitrogen",      "numChannels": 8},
-    {"name": "soilP",  "field": "phosphorus",     "numChannels": 8},
-    {"name": "soilK",  "field": "potassium",      "numChannels": 8},
-    {"name": "soilPH", "field": "pH",             "numChannels": 8},
-    {"name": "soilOM", "field": "organicMatter",  "numChannels": 8},
+    # Nutrients
+    {"name": "soilN",          "field": "nitrogen",        "numChannels": 8},
+    {"name": "soilP",          "field": "phosphorus",      "numChannels": 8},
+    {"name": "soilK",          "field": "potassium",       "numChannels": 8},
+    {"name": "soilPH",         "field": "pH",              "numChannels": 8},
+    {"name": "soilOM",         "field": "organicMatter",   "numChannels": 8},
+    # Biotic / physical pressure
+    {"name": "soilPest",       "field": "pestPressure",    "numChannels": 8},
+    {"name": "soilDisease",    "field": "diseasePressure", "numChannels": 8},
+    {"name": "soilCompaction", "field": "compaction",      "numChannels": 8},
+    # weed: read-only from game's native weed density map — not installed here
 ]
 
 # We copy this existing blank GRLE as the template for each new layer.

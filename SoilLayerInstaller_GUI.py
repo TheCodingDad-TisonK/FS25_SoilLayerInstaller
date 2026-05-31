@@ -151,11 +151,17 @@ def find_base_game_map(map_id, game_dir):
 
 # ── Soil layer definitions ─────────────────────────────────────────────────────
 SOIL_LAYERS = [
-    {"name": "soilN",  "numChannels": 8},
-    {"name": "soilP",  "numChannels": 8},
-    {"name": "soilK",  "numChannels": 8},
-    {"name": "soilPH", "numChannels": 8},
-    {"name": "soilOM", "numChannels": 8},
+    # Nutrients — read/written by SoilFertilizer per fertilizer event
+    {"name": "soilN",          "numChannels": 8},
+    {"name": "soilP",          "numChannels": 8},
+    {"name": "soilK",          "numChannels": 8},
+    {"name": "soilPH",         "numChannels": 8},
+    {"name": "soilOM",         "numChannels": 8},
+    # Biotic / physical pressure — written by SoilFertilizer simulation
+    {"name": "soilPest",       "numChannels": 8},
+    {"name": "soilDisease",    "numChannels": 8},
+    {"name": "soilCompaction", "numChannels": 8},
+    # Note: weed is NOT created here — it is read from the game's native weed density map
 ]
 BLANK_GRLE_SOURCE = "maps/data/infoLayer_fieldType.grle"
 

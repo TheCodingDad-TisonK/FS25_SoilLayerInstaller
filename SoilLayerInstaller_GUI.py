@@ -10,10 +10,27 @@ from tkinter import ttk, messagebox, scrolledtext
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-MODS_DIR  = os.path.join(os.environ.get("USERPROFILE", "C:/Users/Default"),
-                         "Documents", "My Games", "FarmingSimulator2025", "mods")
-SAVES_DIR = os.path.join(os.environ.get("USERPROFILE", "C:/Users/Default"),
-                         "Documents", "My Games", "FarmingSimulator2025")
+def _get_documents_dir():
+    # Query the Windows Shell for the real Documents path.
+    # This correctly handles OneDrive redirection, custom folder locations,
+    # and any other non-standard Documents placements.
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+        path, _ = winreg.QueryValueEx(key, "Personal")
+        winreg.CloseKey(key)
+        if path and os.path.isdir(path):
+            return path
+    except Exception:
+        pass
+    # Fallback: standard location (works when OneDrive is not involved)
+    return os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Documents")
+
+_DOCS    = _get_documents_dir()
+MODS_DIR  = os.path.join(_DOCS, "My Games", "FarmingSimulator2025", "mods")
+SAVES_DIR = os.path.join(_DOCS, "My Games", "FarmingSimulator2025")
 
 SOIL_LAYERS = [
     {"name": "soilN",  "numChannels": 8},

@@ -24,10 +24,26 @@ import os, sys, re, shutil, zipfile
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-MODS_DIR  = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")),
-                         "Documents", "My Games", "FarmingSimulator2025", "mods")
-SAVES_DIR = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")),
-                         "Documents", "My Games", "FarmingSimulator2025")
+def _get_documents_dir():
+    # Query the Windows Shell for the real Documents path.
+    # This correctly handles OneDrive redirection, custom folder locations,
+    # and any other non-standard Documents placements.
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+        path, _ = winreg.QueryValueEx(key, "Personal")
+        winreg.CloseKey(key)
+        if path and os.path.isdir(path):
+            return path
+    except Exception:
+        pass
+    return os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Documents")
+
+_DOCS    = _get_documents_dir()
+MODS_DIR  = os.path.join(_DOCS, "My Games", "FarmingSimulator2025", "mods")
+SAVES_DIR = os.path.join(_DOCS, "My Games", "FarmingSimulator2025")
 
 # The 5 soil layers we inject.  Name = i3d short name (engine prefixes infoLayer_).
 SOIL_LAYERS = [

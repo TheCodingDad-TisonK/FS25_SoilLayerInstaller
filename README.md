@@ -4,7 +4,7 @@
 
 **One-click tool that unlocks the full soil map in FS25_SoilFertilizer**
 
-[![Requires](https://img.shields.io/badge/requires-FS25__SoilFertilizer_v2.2.6%2B-4caf50?style=for-the-badge)](https://github.com/TheCodingDad-TisonK/FS25_SoilFertilizer)
+[![Requires](https://img.shields.io/badge/requires-FS25__SoilFertilizer_v2.3.0%2B-4caf50?style=for-the-badge)](https://github.com/TheCodingDad-TisonK/FS25_SoilFertilizer)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=for-the-badge&logo=windows)]()
 [![License](https://img.shields.io/badge/license-CC%20BY--NC--ND%204.0-lightgrey?style=for-the-badge)](https://creativecommons.org/licenses/by-nc-nd/4.0/)
 
@@ -16,7 +16,7 @@
 
 By default, [FS25_SoilFertilizer](https://github.com/TheCodingDad-TisonK/FS25_SoilFertilizer) tracks one average nutrient value per field. Spray the left half of a field with nitrogen and the whole field shows the same number — because the game doesn't have individual pixel layers for soil nutrients until you add them.
 
-This tool patches your active map mod to add five density-map layers:
+This tool patches your active map mod to add eight density-map layers:
 
 | Layer | Tracks |
 |---|---|
@@ -25,6 +25,9 @@ This tool patches your active map mod to add five density-map layers:
 | `soilK` | Potassium |
 | `soilPH` | pH |
 | `soilOM` | Organic Matter |
+| `soilPest` | Pest pressure |
+| `soilDisease` | Disease pressure |
+| `soilCompaction` | Soil compaction |
 
 Once the patch is applied, the soil overlay map shows real per-pixel values — spray half a field and you'll see a visible left/right split on the map.
 
@@ -66,9 +69,9 @@ The installer finds your savegame and map automatically. No folder browsing requ
 
 1. Reads your active savegame to identify which map mod you're using
 2. Creates a backup of the map mod ZIP before touching anything
-3. Patches the map's `.i3d` file inside the ZIP — adds five `<File>` and `<InfoLayer>` entries
+3. Patches the map's `.i3d` file inside the ZIP — adds eight `<File>` and `<InfoLayer>` entries
 4. Copies a blank GRLE file (all zeros) as the starting data for each new layer
-5. Repacks the ZIP and verifies all five layers are present
+5. Repacks the ZIP and verifies all eight layers are present
 
 On next game load, the engine registers the new layers automatically. FS25_SoilFertilizer detects them and switches from field-average mode to per-pixel mode.
 
@@ -79,11 +82,11 @@ On next game load, the engine registers the new layers automatically. FS25_SoilF
 Any FS25 map mod that:
 - Ships as a single ZIP in the Mods folder
 - Has its main `.i3d` file at `maps/mapXX.i3d` inside the ZIP
-- Stores terrain data at `maps/data/` inside the ZIP
+- Contains at least one `.grle` file (used as the blank layer template)
 
-**Tested on:** The Pichonniere Valley (`FS25_The_Pichonniere_Valley`)
+The installer automatically searches for a GRLE template — maps that don't include `maps/data/` (e.g. Midwest Horizon RCR) are supported via a fallback scan of the full ZIP.
 
-Most standard FS25 maps follow this structure. Custom maps that deviate significantly may not be detected — open an issue if yours doesn't work.
+Custom maps that store the `.i3d` at a non-standard path may not be detected — open an issue if yours doesn't work.
 
 ---
 

@@ -204,12 +204,31 @@ def main():
             print("If you need to re-patch, restore the backup zip and re-run.")
             sys.exit(0)
 
-        # 6. Read blank GRLE template
-        if BLANK_GRLE_SOURCE not in z.namelist():
-            print(f"ERROR: Blank GRLE template not found: {BLANK_GRLE_SOURCE}")
+        # 6. Read blank GRLE template — prefer the canonical fieldType source, but
+        #    fall back to any other GRLE in maps/data/ or anywhere in the zip.
+        #    Some maps (e.g. Midwest Horizon RCR) omit maps/data/ entirely.
+        blank_grle_source = None
+        blank_grle_data   = None
+        candidates = [BLANK_GRLE_SOURCE]
+        all_entries = z.namelist()
+        # Add all GRLEs in maps/data/ as secondary candidates
+        for entry in all_entries:
+            if entry.startswith("maps/data/") and entry.endswith(".grle") and entry not in candidates:
+                candidates.append(entry)
+        # Last resort: any .grle anywhere in the zip
+        for entry in all_entries:
+            if entry.endswith(".grle") and entry not in candidates:
+                candidates.append(entry)
+        for candidate in candidates:
+            if candidate in all_entries:
+                blank_grle_source = candidate
+                blank_grle_data   = z.read(candidate)
+                break
+        if blank_grle_data is None:
+            print("ERROR: No GRLE file found in the map zip to use as a blank template.")
+            print("       The map must contain at least one .grle file.")
             sys.exit(1)
-        blank_grle_data = z.read(BLANK_GRLE_SOURCE)
-        print(f"\nBlank GRLE template: {BLANK_GRLE_SOURCE} ({len(blank_grle_data):,} bytes)")
+        print(f"\nBlank GRLE template: {blank_grle_source} ({len(blank_grle_data):,} bytes)")
 
         # Snapshot all existing files so we can repack
         existing_files = {}

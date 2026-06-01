@@ -204,29 +204,48 @@ def main():
             print("If you need to re-patch, restore the backup zip and re-run.")
             sys.exit(0)
 
-        # 6. Read blank GRLE template — prefer the canonical fieldType source, but
-        #    fall back to any other GRLE in maps/data/ or anywhere in the zip.
-        #    Some maps (e.g. Midwest Horizon RCR) omit maps/data/ entirely.
+        # 6. Read blank GRLE template.
+        #    Priority order (from most to least preferred):
+        #      1. maps/data/infoLayer_fieldType.grle  — canonical blank info layer
+        #      2. maps/data/densityMap_weed*.grle     — present on every FS25 map
+        #      3. Any other infoLayer_*.grle in maps/data/
+        #      4. Any other GRLE in maps/data/
+        #      5. Any .grle anywhere in the zip (last resort)
         blank_grle_source = None
         blank_grle_data   = None
-        candidates = [BLANK_GRLE_SOURCE]
         all_entries = z.namelist()
-        # Add all GRLEs in maps/data/ as secondary candidates
+        all_entries_set = set(all_entries)
+
+        candidates = []
+        # 1. Preferred canonical blank
+        if BLANK_GRLE_SOURCE in all_entries_set:
+            candidates.append(BLANK_GRLE_SOURCE)
+        # 2. Weed density map — present on every standard and custom FS25 map
+        for entry in all_entries:
+            if "densitymap_weed" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
+                candidates.append(entry)
+        # 3. Any infoLayer in maps/data/
+        for entry in all_entries:
+            if entry.startswith("maps/data/") and "infolayer_" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
+                candidates.append(entry)
+        # 4. Any other GRLE in maps/data/
         for entry in all_entries:
             if entry.startswith("maps/data/") and entry.endswith(".grle") and entry not in candidates:
                 candidates.append(entry)
-        # Last resort: any .grle anywhere in the zip
+        # 5. Any .grle anywhere
         for entry in all_entries:
             if entry.endswith(".grle") and entry not in candidates:
                 candidates.append(entry)
+
         for candidate in candidates:
-            if candidate in all_entries:
+            if candidate in all_entries_set:
                 blank_grle_source = candidate
                 blank_grle_data   = z.read(candidate)
                 break
+
         if blank_grle_data is None:
             print("ERROR: No GRLE file found in the map zip to use as a blank template.")
-            print("       The map must contain at least one .grle file.")
+            print("       The map must contain at least one .grle file (including densityMap_weed.grle).")
             sys.exit(1)
         print(f"\nBlank GRLE template: {blank_grle_source} ({len(blank_grle_data):,} bytes)")
 

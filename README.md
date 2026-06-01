@@ -58,7 +58,7 @@ The installer finds your savegame and map automatically. No folder browsing requ
 ## Requirements
 
 - Farming Simulator 25 installed
-- [FS25_SoilFertilizer](https://github.com/TheCodingDad-TisonK/FS25_SoilFertilizer) **v2.2.6.0 or later**
+- [FS25_SoilFertilizer](https://github.com/TheCodingDad-TisonK/FS25_SoilFertilizer) **v2.3.0.0 or later**
 - At least one career save using the map you want to patch
 - The map mod ZIP installed in your Mods folder
 - FS25 **closed** when you run the installer

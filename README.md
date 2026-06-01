@@ -31,8 +31,11 @@ Once the patch is applied, the soil overlay map shows real per-pixel values — 
 ---
 
 ## Screenshot
+<img width="339" height="444" alt="image" src="https://github.com/user-attachments/assets/74669e79-ec0d-4455-8e90-b93fc515ef2b" />
+<img width="333" height="449" alt="image" src="https://github.com/user-attachments/assets/6e2f2e65-fc36-4e78-8592-5dc2d84d3260" />
+<img width="333" height="448" alt="image" src="https://github.com/user-attachments/assets/28226635-2da8-46e6-ad15-b70a458a937d" />
 
-![Soil Layer Installer GUI](screenshot.png)
+
 
 ---
 

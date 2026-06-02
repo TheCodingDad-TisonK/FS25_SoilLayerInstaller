@@ -97,18 +97,52 @@ def find_map_zip(map_id):
     return None
 
 def find_i3d_path(z):
-    """Find the main i3d file inside the zip (usually maps/mapXX.i3d)."""
-    candidates = [
-        f for f in z.namelist()
-        if f.endswith(".i3d") and f.count("/") == 1
-    ]
-    if candidates:
-        return candidates[0]
-    # Broader search
-    for f in z.namelist():
-        if f.endswith(".i3d") and "map" in f.lower():
-            return f
-    return None
+    """Find the main map i3d file inside the zip.
+
+    Handles all common FS25 map structures:
+      maps/mapXX.i3d   (standard Giants layout)
+      map/mapXX.i3d    (alternate single-folder layout)
+      mapXX.i3d        (root-level layout)
+      SomeFolder/data/mapXX.i3d  (deep custom layout)
+    """
+    names = z.namelist()
+
+    # 1. Prefer shallow entries (depth 0 or 1) that contain "map" in the filename.
+    def filename_part(p):
+        return p.rsplit("/", 1)[-1].lower()
+
+    shallow = sorted(
+        [f for f in names if f.endswith(".i3d") and f.count("/") <= 1],
+        key=lambda f: f.count("/")   # root-level before single-folder
+    )
+    # Among shallow candidates, prefer ones with "map" in the filename.
+    preferred = [f for f in shallow if "map" in filename_part(f)]
+    if preferred:
+        return preferred[0]
+    if shallow:
+        return shallow[0]
+
+    # 2. Any depth — prefer shallower, prefer "map" in filename.
+    all_i3d = sorted(
+        [f for f in names if f.endswith(".i3d")],
+        key=lambda f: (f.count("/"), "map" not in filename_part(f))
+    )
+    return all_i3d[0] if all_i3d else None
+
+
+def get_data_dir(i3d_path):
+    """Return the zip-absolute data directory for GRLE files, derived from the i3d location.
+
+    Examples:
+      maps/mapEU.i3d  → maps/data/
+      map/mapEU.i3d   → map/data/
+      mapEU.i3d       → data/
+    """
+    if "/" in i3d_path:
+        i3d_folder = i3d_path.rsplit("/", 1)[0] + "/"
+    else:
+        i3d_folder = ""
+    return i3d_folder + "data/"
 
 def already_patched(i3d_content):
     """Return True if our layers are already in the i3d."""
@@ -204,33 +238,39 @@ def main():
             print("If you need to re-patch, restore the backup zip and re-run.")
             sys.exit(0)
 
+        # Derive the data directory from the actual i3d location so we work
+        # regardless of whether the map uses maps/, map/, or a custom folder.
+        data_dir = get_data_dir(i3d_path)
+        print(f"Data dir : {data_dir}")
+
         # 6. Read blank GRLE template.
         #    Priority order (from most to least preferred):
-        #      1. maps/data/infoLayer_fieldType.grle  — canonical blank info layer
-        #      2. maps/data/densityMap_weed*.grle     — present on every FS25 map
-        #      3. Any other infoLayer_*.grle in maps/data/
-        #      4. Any other GRLE in maps/data/
+        #      1. <data_dir>infoLayer_fieldType.grle  — canonical blank info layer
+        #      2. <data_dir>densityMap_weed*.grle     — present on every FS25 map
+        #      3. Any other infoLayer_*.grle in <data_dir>
+        #      4. Any other GRLE in <data_dir>
         #      5. Any .grle anywhere in the zip (last resort)
         blank_grle_source = None
         blank_grle_data   = None
         all_entries = z.namelist()
         all_entries_set = set(all_entries)
 
+        canonical = data_dir + "infoLayer_fieldType.grle"
         candidates = []
         # 1. Preferred canonical blank
-        if BLANK_GRLE_SOURCE in all_entries_set:
-            candidates.append(BLANK_GRLE_SOURCE)
+        if canonical in all_entries_set:
+            candidates.append(canonical)
         # 2. Weed density map — present on every standard and custom FS25 map
         for entry in all_entries:
             if "densitymap_weed" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
                 candidates.append(entry)
-        # 3. Any infoLayer in maps/data/
+        # 3. Any infoLayer in data_dir
         for entry in all_entries:
-            if entry.startswith("maps/data/") and "infolayer_" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
+            if entry.startswith(data_dir) and "infolayer_" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
                 candidates.append(entry)
-        # 4. Any other GRLE in maps/data/
+        # 4. Any other GRLE in data_dir
         for entry in all_entries:
-            if entry.startswith("maps/data/") and entry.endswith(".grle") and entry not in candidates:
+            if entry.startswith(data_dir) and entry.endswith(".grle") and entry not in candidates:
                 candidates.append(entry)
         # 5. Any .grle anywhere
         for entry in all_entries:
@@ -272,9 +312,10 @@ def main():
         fid  = max_fid + 1 + i
         name = layer["name"]
         nc   = layer["numChannels"]
-        # Path inside zip — relative to i3d location (maps/) → data/
-        grle_zip_path = f"maps/data/infoLayer_{name}.grle"
-        # i3d relative path (no "maps/" prefix since i3d is in maps/)
+        # Absolute path inside zip — derived from where the i3d lives.
+        grle_zip_path = f"{data_dir}infoLayer_{name}.grle"
+        # i3d-relative path — always "data/infoLayer_*.grle" since data/ is
+        # a sibling of the i3d file regardless of which top-level folder is used.
         i3d_rel_path  = f"data/infoLayer_{name}.grle"
 
         new_file_entries.append((fid, i3d_rel_path))
@@ -320,7 +361,7 @@ def main():
         ok = True
         for layer in SOIL_LAYERS:
             name = layer["name"]
-            grle = f"maps/data/infoLayer_{name}.grle"
+            grle = f"{data_dir}infoLayer_{name}.grle"
             if f'name="{name}"' in i3d_check:
                 print(f"  [OK] InfoLayer name={name!r} in i3d")
             else:

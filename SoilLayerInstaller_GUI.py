@@ -8,7 +8,7 @@ import os, re, shutil, zipfile, threading, datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.3"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -188,13 +188,51 @@ def find_map_zip(map_id, mods_dir):
     return None
 
 def find_i3d_path(z):
-    candidates = [f for f in z.namelist() if f.endswith(".i3d") and f.count("/") == 1]
-    if candidates:
-        return candidates[0]
-    for f in z.namelist():
-        if f.endswith(".i3d") and "map" in f.lower():
-            return f
-    return None
+    """Find the main map i3d file inside the zip.
+
+    Handles all common FS25 map structures:
+      maps/mapXX.i3d   (standard Giants layout)
+      map/mapXX.i3d    (alternate single-folder layout)
+      mapXX.i3d        (root-level layout)
+      SomeFolder/data/mapXX.i3d  (deep custom layout)
+    """
+    names = z.namelist()
+
+    def filename_part(p):
+        return p.rsplit("/", 1)[-1].lower()
+
+    # 1. Prefer shallow (depth 0 or 1) with "map" in the filename.
+    shallow = sorted(
+        [f for f in names if f.endswith(".i3d") and f.count("/") <= 1],
+        key=lambda f: f.count("/")
+    )
+    preferred = [f for f in shallow if "map" in filename_part(f)]
+    if preferred:
+        return preferred[0]
+    if shallow:
+        return shallow[0]
+
+    # 2. Any depth — prefer shallower, prefer "map" in filename.
+    all_i3d = sorted(
+        [f for f in names if f.endswith(".i3d")],
+        key=lambda f: (f.count("/"), "map" not in filename_part(f))
+    )
+    return all_i3d[0] if all_i3d else None
+
+
+def get_data_dir(i3d_path):
+    """Return the zip-absolute data directory for GRLE files, derived from the i3d location.
+
+    Examples:
+      maps/mapEU.i3d  → maps/data/
+      map/mapEU.i3d   → map/data/
+      mapEU.i3d       → data/
+    """
+    if "/" in i3d_path:
+        i3d_folder = i3d_path.rsplit("/", 1)[0] + "/"
+    else:
+        i3d_folder = ""
+    return i3d_folder + "data/"
 
 def already_patched(i3d_content):
     # Check both InfoLayer entry AND File entry — a failed first run may have added
@@ -442,19 +480,43 @@ def run_installer_zip(sg, log, force=False):
             log("INFO", "Map is already patched — nothing to do.")
             return True, "already_patched"
 
+        # Derive the data directory from the actual i3d location so maps that
+        # use map/, maps/, or a custom folder all work correctly.
+        data_dir = get_data_dir(i3d_path)
+        log("DEBUG", f"Data dir : {data_dir}")
+
         blank      = None
         blank_src  = None
-        # Primary: standard path
-        if BLANK_GRLE_SOURCE in z.namelist():
-            blank     = z.read(BLANK_GRLE_SOURCE)
-            blank_src = BLANK_GRLE_SOURCE
-        else:
-            # Fallback: search the entire ZIP for any .grle (maps may use different subfolder layouts)
-            for entry in sorted(z.namelist()):
-                if entry.endswith(".grle"):
-                    blank     = z.read(entry)
-                    blank_src = entry
-                    break
+        all_names  = z.namelist()
+        canonical  = data_dir + "infoLayer_fieldType.grle"
+
+        # Priority order for blank GRLE template:
+        #  1. <data_dir>infoLayer_fieldType.grle  — preferred canonical blank
+        #  2. Any densityMap_weed*.grle            — present on virtually every FS25 map
+        #  3. Any infoLayer_*.grle in data_dir
+        #  4. Any other .grle in data_dir
+        #  5. Any .grle anywhere in the zip        — last resort
+        candidates = []
+        if canonical in all_names:
+            candidates.append(canonical)
+        for e in all_names:
+            if "densitymap_weed" in e.lower() and e.endswith(".grle") and e not in candidates:
+                candidates.append(e)
+        for e in all_names:
+            if e.startswith(data_dir) and "infolayer_" in e.lower() and e.endswith(".grle") and e not in candidates:
+                candidates.append(e)
+        for e in all_names:
+            if e.startswith(data_dir) and e.endswith(".grle") and e not in candidates:
+                candidates.append(e)
+        for e in all_names:
+            if e.endswith(".grle") and e not in candidates:
+                candidates.append(e)
+
+        for candidate in candidates:
+            blank     = z.read(candidate)
+            blank_src = candidate
+            break
+
         if blank is None:
             raise RuntimeError(
                 "No GRLE file found anywhere inside the map ZIP.\n\n"
@@ -462,10 +524,10 @@ def run_installer_zip(sg, log, force=False):
                 "soil layers. This map does not appear to contain any GRLE files at all — "
                 "it may be incomplete or use an unusual structure.\n\n"
                 "Please open a GitHub issue with your map name and we will investigate.")
-        if blank_src != BLANK_GRLE_SOURCE:
+        if blank_src != canonical:
             log("WARNING", f"Standard template not found — using fallback: {blank_src}")
         log("DEBUG", f"GRLE template : {blank_src} ({len(blank):,} bytes)")
-        snapshot = {item: z.read(item) for item in z.namelist()}
+        snapshot = {item: z.read(item) for item in all_names}
 
     bp = zip_path + ".backup_soilinstaller"
     if not os.path.exists(bp):
@@ -483,7 +545,7 @@ def run_installer_zip(sg, log, force=False):
         nc   = layer["numChannels"]
         fe.append((fid, f"data/infoLayer_{name}.grle"))
         le.append((name, fid, nc))
-        gf[f"maps/data/infoLayer_{name}.grle"] = blank
+        gf[f"{data_dir}infoLayer_{name}.grle"] = blank
 
     log("INFO", f"Adding {len(SOIL_LAYERS)} layers (IDs {max_fid+1}–{max_fid+len(SOIL_LAYERS)}):")
     for name, fid, _ in le:
@@ -508,7 +570,7 @@ def run_installer_zip(sg, log, force=False):
         names = z.namelist()
         for layer in SOIL_LAYERS:
             n    = layer["name"]
-            grle = f"maps/data/infoLayer_{n}.grle"
+            grle = f"{data_dir}infoLayer_{n}.grle"
             good = (f'name="{n}"' in check) and (grle in names)
             log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
             if not good:

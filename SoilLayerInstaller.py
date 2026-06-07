@@ -20,7 +20,7 @@ USAGE
   Run once, then reload FS25.  Safe to re-run (detects existing patches).
 """
 
-import os, sys, re, shutil, zipfile
+import os, sys, re, shutil, struct, zipfile
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -144,9 +144,45 @@ def get_data_dir(i3d_path):
         i3d_folder = ""
     return i3d_folder + "data/"
 
+def get_grle_width(data):
+    """Return the width in pixels from a GRLE file header, or None if unrecognized."""
+    if len(data) < 8 or data[:4] != b'GRLE':
+        return None
+    units = struct.unpack_from('<H', data, 6)[0]
+    return units * 256 if units > 0 else None
+
+def make_blank_grle_1024():
+    """Generate a blank 1024×1024 GRLE with 8 channels (all zeros).
+
+    Header layout (17 bytes): GRLE magic, version=1, width/256=4, padding,
+    height/256=4, fixed bytes 12-16.
+    Preamble (6 bytes): observed on all blank layers in game data.
+    RLE data: 4112 × 0xFF (255 zeros each) + 0x10 (16 zeros)
+              = 4112 × 255 + 16 = 1,048,576 = 1024 × 1024 zero bytes.
+    """
+    header = (
+        b'GRLE'
+        + b'\x01\x00'                # version
+        + b'\x04\x00'                # width / 256 = 4 → 1024 px
+        + b'\x00\x00'                # padding
+        + b'\x04\x00'                # height / 256 = 4 → 1024 px
+        + b'\x00\x01\x00\x00\x00'   # bytes 12-16 (constant across all GRLEs)
+    )
+    preamble = b'\x03\x01\x01\x00\x00\x00'
+    rle = b'\xff' * 4112 + b'\x10'
+    return header + preamble + rle
+
+def get_missing_layers(i3d_content):
+    """Return the SOIL_LAYERS entries whose InfoLayer is NOT yet in the i3d."""
+    return [
+        layer for layer in SOIL_LAYERS
+        if f'name="{layer["name"]}"' not in i3d_content
+        and f'infoLayer_{layer["name"]}.grle' not in i3d_content
+    ]
+
 def already_patched(i3d_content):
-    """Return True if our layers are already in the i3d."""
-    return 'name="soilN"' in i3d_content
+    """Return True only if ALL 8 soil layers are present in the i3d."""
+    return len(get_missing_layers(i3d_content)) == 0
 
 def get_max_file_id(i3d_content):
     """Return the highest fileId integer found in the i3d."""
@@ -232,62 +268,31 @@ def main():
 
         i3d_content = z.read(i3d_path).decode("utf-8-sig", errors="ignore")
 
-        # 5. Check if already patched
-        if already_patched(i3d_content):
-            print("\nMap is already patched (soilN layer found). Nothing to do.")
+        # 5. Check which layers are missing
+        missing_layers = get_missing_layers(i3d_content)
+        if not missing_layers:
+            print("\nMap is already fully patched (all 8 layers present). Nothing to do.")
             print("If you need to re-patch, restore the backup zip and re-run.")
             sys.exit(0)
+
+        if len(missing_layers) < len(SOIL_LAYERS):
+            present = len(SOIL_LAYERS) - len(missing_layers)
+            print(f"\nPartial patch detected: {present}/8 layers present.")
+            print(f"Adding {len(missing_layers)} missing layer(s): "
+                  + ", ".join(l["name"] for l in missing_layers))
+        else:
+            print(f"\nFresh install: adding all {len(SOIL_LAYERS)} layers.")
 
         # Derive the data directory from the actual i3d location so we work
         # regardless of whether the map uses maps/, map/, or a custom folder.
         data_dir = get_data_dir(i3d_path)
         print(f"Data dir : {data_dir}")
 
-        # 6. Read blank GRLE template.
-        #    Priority order (from most to least preferred):
-        #      1. <data_dir>infoLayer_fieldType.grle  — canonical blank info layer
-        #      2. <data_dir>densityMap_weed*.grle     — present on every FS25 map
-        #      3. Any other infoLayer_*.grle in <data_dir>
-        #      4. Any other GRLE in <data_dir>
-        #      5. Any .grle anywhere in the zip (last resort)
-        blank_grle_source = None
-        blank_grle_data   = None
-        all_entries = z.namelist()
-        all_entries_set = set(all_entries)
-
-        canonical = data_dir + "infoLayer_fieldType.grle"
-        candidates = []
-        # 1. Preferred canonical blank
-        if canonical in all_entries_set:
-            candidates.append(canonical)
-        # 2. Weed density map — present on every standard and custom FS25 map
-        for entry in all_entries:
-            if "densitymap_weed" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
-                candidates.append(entry)
-        # 3. Any infoLayer in data_dir
-        for entry in all_entries:
-            if entry.startswith(data_dir) and "infolayer_" in entry.lower() and entry.endswith(".grle") and entry not in candidates:
-                candidates.append(entry)
-        # 4. Any other GRLE in data_dir
-        for entry in all_entries:
-            if entry.startswith(data_dir) and entry.endswith(".grle") and entry not in candidates:
-                candidates.append(entry)
-        # 5. Any .grle anywhere
-        for entry in all_entries:
-            if entry.endswith(".grle") and entry not in candidates:
-                candidates.append(entry)
-
-        for candidate in candidates:
-            if candidate in all_entries_set:
-                blank_grle_source = candidate
-                blank_grle_data   = z.read(candidate)
-                break
-
-        if blank_grle_data is None:
-            print("ERROR: No GRLE file found in the map zip to use as a blank template.")
-            print("       The map must contain at least one .grle file (including densityMap_weed.grle).")
-            sys.exit(1)
-        print(f"\nBlank GRLE template: {blank_grle_source} ({len(blank_grle_data):,} bytes)")
+        # 6. Always use a generated blank 1024×1024 GRLE so soil layers are
+        #    the correct resolution regardless of which map is being patched.
+        blank_grle_data   = make_blank_grle_1024()
+        blank_grle_source = "<generated blank 1024×1024>"
+        print(f"\nBlank GRLE: {blank_grle_source} ({len(blank_grle_data):,} bytes)")
 
         # Snapshot all existing files so we can repack
         existing_files = {}
@@ -302,27 +307,24 @@ def main():
     else:
         print(f"Backup   : already exists — skipping copy")
 
-    # 8. Compute new fileIds
+    # 8. Compute new fileIds (only for missing layers)
     max_fid = get_max_file_id(i3d_content)
     new_file_entries = []
     new_layer_entries = []
     new_grle_files = {}
 
-    for i, layer in enumerate(SOIL_LAYERS):
+    for i, layer in enumerate(missing_layers):
         fid  = max_fid + 1 + i
         name = layer["name"]
         nc   = layer["numChannels"]
-        # Absolute path inside zip — derived from where the i3d lives.
         grle_zip_path = f"{data_dir}infoLayer_{name}.grle"
-        # i3d-relative path — always "data/infoLayer_*.grle" since data/ is
-        # a sibling of the i3d file regardless of which top-level folder is used.
         i3d_rel_path  = f"data/infoLayer_{name}.grle"
 
         new_file_entries.append((fid, i3d_rel_path))
         new_layer_entries.append((name, fid, nc))
         new_grle_files[grle_zip_path] = blank_grle_data
 
-    print(f"\nAssigning fileIds {max_fid+1} – {max_fid+len(SOIL_LAYERS)} for soil layers")
+    print(f"\nAssigning fileIds {max_fid+1} – {max_fid+len(missing_layers)} for new layers")
     for (name, fid, nc), (_, i3d_fn) in zip(new_layer_entries, new_file_entries):
         print(f"  fileId={fid}  name={name!r}  -> {i3d_fn}")
 

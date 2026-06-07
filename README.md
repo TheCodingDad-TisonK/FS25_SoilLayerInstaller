@@ -70,7 +70,7 @@ The installer finds your savegame and map automatically. No folder browsing requ
 1. Reads your active savegame to identify which map mod you're using
 2. Creates a backup of the map mod ZIP before touching anything
 3. Patches the map's `.i3d` file inside the ZIP — adds eight `<File>` and `<InfoLayer>` entries
-4. Copies a blank GRLE file (all zeros) as the starting data for each new layer
+4. Generates a blank 1024×1024 GRLE (all zeros) as the starting data for each new layer
 5. Repacks the ZIP and verifies all eight layers are present
 
 On next game load, the engine registers the new layers automatically. FS25_SoilFertilizer detects them and switches from field-average mode to per-pixel mode.
@@ -108,9 +108,9 @@ YourMap.zip.backup_soilinstaller
 
 ## Already Patched?
 
-Re-running the installer on a patched map shows **Already Patched ✓** and does nothing. Safe to run at any time.
+Re-running the installer on a fully patched map shows **Already Patched ✓** and does nothing.
 
-To force a re-patch: restore the backup first, then run the installer again.
+If your map was patched by an older version of this tool (which only added the 5 nutrient layers), the installer will detect the missing layers and add them automatically — no backup restore needed.
 
 ---
 

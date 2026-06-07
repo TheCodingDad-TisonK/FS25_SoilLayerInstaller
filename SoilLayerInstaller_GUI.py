@@ -4,11 +4,11 @@ FS25 SoilFertilizer — Soil Layer Installer  (GUI v2)
 Tabbed UI: Installer | Settings | Log
 """
 
-import os, re, shutil, zipfile, threading, datetime
+import os, re, shutil, struct, zipfile, threading, datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.5"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -234,10 +234,45 @@ def get_data_dir(i3d_path):
         i3d_folder = ""
     return i3d_folder + "data/"
 
+def get_grle_width(data):
+    """Return the width in pixels from a GRLE file header, or None if unrecognized."""
+    if len(data) < 8 or data[:4] != b'GRLE':
+        return None
+    units = struct.unpack_from('<H', data, 6)[0]
+    return units * 256 if units > 0 else None
+
+def make_blank_grle_1024():
+    """Generate a blank 1024×1024 GRLE with 8 channels (all zeros).
+
+    Header layout (17 bytes): GRLE magic, version=1, width/256=4, padding,
+    height/256=4, fixed bytes 12-16.
+    Preamble (6 bytes): observed on all blank layers in game data.
+    RLE: 4112 × 0xFF (255 zeros each) + 0x10 (16 zeros)
+         = 4112 × 255 + 16 = 1,048,576 = 1024 × 1024 zero bytes.
+    """
+    header = (
+        b'GRLE'
+        + b'\x01\x00'                # version
+        + b'\x04\x00'                # width / 256 = 4 → 1024 px
+        + b'\x00\x00'                # padding
+        + b'\x04\x00'                # height / 256 = 4 → 1024 px
+        + b'\x00\x01\x00\x00\x00'   # bytes 12-16 (constant across all GRLEs)
+    )
+    preamble = b'\x03\x01\x01\x00\x00\x00'
+    rle = b'\xff' * 4112 + b'\x10'
+    return header + preamble + rle
+
+def get_missing_layers(i3d_content):
+    """Return SOIL_LAYERS entries whose InfoLayer is not yet present in the i3d."""
+    return [
+        layer for layer in SOIL_LAYERS
+        if f'name="{layer["name"]}"' not in i3d_content
+        and f'infoLayer_{layer["name"]}.grle' not in i3d_content
+    ]
+
 def already_patched(i3d_content):
-    # Check both InfoLayer entry AND File entry — a failed first run may have added
-    # File entries without InfoLayer entries, leaving a half-patched state.
-    return 'name="soilN"' in i3d_content or 'infoLayer_soilN.grle' in i3d_content
+    """Return True only if ALL 8 soil layers are present in the i3d."""
+    return len(get_missing_layers(i3d_content)) == 0
 
 def get_max_file_id(i3d_content):
     ids = [int(m) for m in re.findall(r'fileId="(\d+)"', i3d_content)]
@@ -386,30 +421,25 @@ def run_installer_base_game(sg, log, force=False):
     with open(i3d_path, encoding="utf-8-sig", errors="ignore") as f:
         raw = f.read()
 
-    if already_patched(raw) and not force:
-        log("INFO", "Map is already patched — nothing to do.")
+    missing = get_missing_layers(raw)
+    if not missing and not force:
+        log("INFO", "Map is already fully patched (all 8 layers present) — nothing to do.")
         return True, "already_patched"
 
-    # Find blank GRLE template in game data directory
-    blank = None
-    grle_template = os.path.join(data_dir, "infoLayer_fieldType.grle")
-    if os.path.exists(grle_template):
-        with open(grle_template, "rb") as f:
-            blank = f.read()
-        log("DEBUG", f"GRLE template : {os.path.basename(grle_template)} ({len(blank):,} bytes)")
+    if force:
+        missing = SOIL_LAYERS  # re-patch all when forced
+
+    if len(missing) < len(SOIL_LAYERS):
+        present = len(SOIL_LAYERS) - len(missing)
+        log("INFO", f"Partial patch: {present}/8 layers already present.")
+        log("INFO", f"Adding {len(missing)} missing layer(s): "
+                    + ", ".join(l["name"] for l in missing))
     else:
-        # Fallback: any .grle in data dir
-        if os.path.isdir(data_dir):
-            for fn in sorted(os.listdir(data_dir)):
-                if fn.endswith(".grle"):
-                    with open(os.path.join(data_dir, fn), "rb") as f:
-                        blank = f.read()
-                    log("DEBUG", f"GRLE template (fallback): {fn} ({len(blank):,} bytes)")
-                    break
-    if blank is None:
-        raise RuntimeError(
-            f"Could not find a GRLE template in:\n{data_dir}\n\n"
-            "Make sure the FS25 game installation path is correct in Settings.")
+        log("INFO", f"Adding all {len(SOIL_LAYERS)} layers.")
+
+    # Always generate a blank 1024×1024 GRLE — correct resolution for soil layers.
+    blank = make_blank_grle_1024()
+    log("DEBUG", f"GRLE template: generated blank 1024×1024 ({len(blank):,} bytes)")
 
     # Backup i3d
     bp = i3d_path + ".backup_soilinstaller"
@@ -423,14 +453,14 @@ def run_installer_base_game(sg, log, force=False):
     max_fid = get_max_file_id(raw)
     log("DEBUG", f"Max existing fileId: {max_fid}")
     fe, le = [], []
-    for idx, layer in enumerate(SOIL_LAYERS):
+    for idx, layer in enumerate(missing):
         fid  = max_fid + 1 + idx
         name = layer["name"]
         nc   = layer["numChannels"]
         fe.append((fid, f"data/infoLayer_{name}.grle"))
         le.append((name, fid, nc))
 
-    log("INFO", f"Adding {len(SOIL_LAYERS)} layers (IDs {max_fid+1}–{max_fid+len(SOIL_LAYERS)}):")
+    log("INFO", f"Adding {len(missing)} layer(s) (IDs {max_fid+1}–{max_fid+len(missing)}):")
     for name, fid, _ in le:
         log("INFO", f"  + {name}  (id={fid})")
 
@@ -440,9 +470,9 @@ def run_installer_base_game(sg, log, force=False):
         f.write(patched_i3d)
     log("DEBUG", "i3d updated.")
 
-    # Write blank GRLE files
+    # Write blank GRLE files (only for newly added layers)
     os.makedirs(data_dir, exist_ok=True)
-    for layer in SOIL_LAYERS:
+    for layer in missing:
         grle_path = os.path.join(data_dir, f"infoLayer_{layer['name']}.grle")
         with open(grle_path, "wb") as f:
             f.write(blank)
@@ -476,57 +506,33 @@ def run_installer_zip(sg, log, force=False):
         log("DEBUG", f"i3d file : {i3d_path}")
         raw = z.read(i3d_path).decode("utf-8-sig", errors="ignore")
 
-        if already_patched(raw) and not force:
-            log("INFO", "Map is already patched — nothing to do.")
+        missing = get_missing_layers(raw)
+        if not missing and not force:
+            log("INFO", "Map is already fully patched (all 8 layers present) — nothing to do.")
             return True, "already_patched"
+
+        if force:
+            missing = SOIL_LAYERS  # re-patch all when forced
+
+        if len(missing) < len(SOIL_LAYERS):
+            present = len(SOIL_LAYERS) - len(missing)
+            log("INFO", f"Partial patch: {present}/8 layers already present.")
+            log("INFO", f"Adding {len(missing)} missing layer(s): "
+                        + ", ".join(l["name"] for l in missing))
+        else:
+            log("INFO", f"Adding all {len(SOIL_LAYERS)} layers.")
 
         # Derive the data directory from the actual i3d location so maps that
         # use map/, maps/, or a custom folder all work correctly.
         data_dir = get_data_dir(i3d_path)
         log("DEBUG", f"Data dir : {data_dir}")
 
-        blank      = None
-        blank_src  = None
-        all_names  = z.namelist()
-        canonical  = data_dir + "infoLayer_fieldType.grle"
-
-        # Priority order for blank GRLE template:
-        #  1. <data_dir>infoLayer_fieldType.grle  — preferred canonical blank
-        #  2. Any densityMap_weed*.grle            — present on virtually every FS25 map
-        #  3. Any infoLayer_*.grle in data_dir
-        #  4. Any other .grle in data_dir
-        #  5. Any .grle anywhere in the zip        — last resort
-        candidates = []
-        if canonical in all_names:
-            candidates.append(canonical)
-        for e in all_names:
-            if "densitymap_weed" in e.lower() and e.endswith(".grle") and e not in candidates:
-                candidates.append(e)
-        for e in all_names:
-            if e.startswith(data_dir) and "infolayer_" in e.lower() and e.endswith(".grle") and e not in candidates:
-                candidates.append(e)
-        for e in all_names:
-            if e.startswith(data_dir) and e.endswith(".grle") and e not in candidates:
-                candidates.append(e)
-        for e in all_names:
-            if e.endswith(".grle") and e not in candidates:
-                candidates.append(e)
-
-        for candidate in candidates:
-            blank     = z.read(candidate)
-            blank_src = candidate
-            break
-
-        if blank is None:
-            raise RuntimeError(
-                "No GRLE file found anywhere inside the map ZIP.\n\n"
-                "The installer copies an existing blank GRLE as the template for the new "
-                "soil layers. This map does not appear to contain any GRLE files at all — "
-                "it may be incomplete or use an unusual structure.\n\n"
-                "Please open a GitHub issue with your map name and we will investigate.")
-        if blank_src != canonical:
-            log("WARNING", f"Standard template not found — using fallback: {blank_src}")
+        # Always generate a blank 1024×1024 GRLE — correct resolution for soil layers.
+        blank     = make_blank_grle_1024()
+        blank_src = "<generated blank 1024×1024>"
         log("DEBUG", f"GRLE template : {blank_src} ({len(blank):,} bytes)")
+
+        all_names = z.namelist()
         snapshot = {item: z.read(item) for item in all_names}
 
     bp = zip_path + ".backup_soilinstaller"
@@ -539,7 +545,7 @@ def run_installer_zip(sg, log, force=False):
     max_fid = get_max_file_id(raw)
     log("DEBUG", f"Max existing fileId: {max_fid}")
     fe, le, gf = [], [], {}
-    for idx, layer in enumerate(SOIL_LAYERS):
+    for idx, layer in enumerate(missing):
         fid  = max_fid + 1 + idx
         name = layer["name"]
         nc   = layer["numChannels"]
@@ -547,7 +553,7 @@ def run_installer_zip(sg, log, force=False):
         le.append((name, fid, nc))
         gf[f"{data_dir}infoLayer_{name}.grle"] = blank
 
-    log("INFO", f"Adding {len(SOIL_LAYERS)} layers (IDs {max_fid+1}–{max_fid+len(SOIL_LAYERS)}):")
+    log("INFO", f"Adding {len(missing)} layer(s) (IDs {max_fid+1}–{max_fid+len(missing)}):")
     for name, fid, _ in le:
         log("INFO", f"  + {name}  (id={fid})")
 
@@ -1169,7 +1175,7 @@ class InstallerApp(tk.Tk):
             self._log("OK", "Patch applied successfully!")
             self._set_status("Patch applied. Launch FS25 and load your save.", GREEN)
             messagebox.showinfo("All done!",
-                "5 soil layers added to your map.\n\n"
+                "Soil layers added to your map.\n\n"
                 "Launch Farming Simulator 25 and load your save.\n"
                 "FS25_SoilFertilizer detects the new layers automatically.")
         else:

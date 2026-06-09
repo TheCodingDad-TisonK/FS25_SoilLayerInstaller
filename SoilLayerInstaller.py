@@ -20,7 +20,7 @@ USAGE
   Run once, then reload FS25.  Safe to re-run (detects existing patches).
 """
 
-import os, sys, re, shutil, struct, zipfile
+import os, sys, re, shutil, struct, zipfile, zlib
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -59,9 +59,6 @@ SOIL_LAYERS = [
     {"name": "soilCompaction", "field": "compaction",      "numChannels": 8},
     # weed: read-only from game's native weed density map — not installed here
 ]
-
-# We copy this existing blank GRLE as the template for each new layer.
-BLANK_GRLE_SOURCE = "maps/data/infoLayer_fieldType.grle"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -144,33 +141,24 @@ def get_data_dir(i3d_path):
         i3d_folder = ""
     return i3d_folder + "data/"
 
-def get_grle_width(data):
-    """Return the width in pixels from a GRLE file header, or None if unrecognized."""
-    if len(data) < 8 or data[:4] != b'GRLE':
-        return None
-    units = struct.unpack_from('<H', data, 6)[0]
-    return units * 256 if units > 0 else None
+def make_blank_png_1024():
+    """Generate a blank 1024×1024 8-bit grayscale PNG (all zeros).
 
-def make_blank_grle_1024():
-    """Generate a blank 1024×1024 GRLE with 8 channels (all zeros).
-
-    Header layout (17 bytes): GRLE magic, version=1, width/256=4, padding,
-    height/256=4, fixed bytes 12-16.
-    Preamble (6 bytes): observed on all blank layers in game data.
-    RLE data: 4112 × 0xFF (255 zeros each) + 0x10 (16 zeros)
-              = 4112 × 255 + 16 = 1,048,576 = 1024 × 1024 zero bytes.
+    Uses only Python stdlib (zlib + struct). FS25 reads this as 8 bits per
+    pixel, which matches numChannels=8 declared in the i3d InfoLayer entry.
     """
-    header = (
-        b'GRLE'
-        + b'\x01\x00'                # version
-        + b'\x04\x00'                # width / 256 = 4 → 1024 px
-        + b'\x00\x00'                # padding
-        + b'\x04\x00'                # height / 256 = 4 → 1024 px
-        + b'\x00\x01\x00\x00\x00'   # bytes 12-16 (constant across all GRLEs)
-    )
-    preamble = b'\x03\x01\x01\x00\x00\x00'
-    rle = b'\xff' * 4112 + b'\x10'
-    return header + preamble + rle
+    W = H = 1024
+
+    def _chunk(tag, data):
+        c = tag + data
+        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xFFFFFFFF)
+
+    sig  = b'\x89PNG\r\n\x1a\n'
+    ihdr = _chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 0, 0, 0, 0))
+    raw  = (b'\x00' + b'\x00' * W) * H   # filter byte + row pixels, repeated
+    idat = _chunk(b'IDAT', zlib.compress(raw, 9))
+    iend = _chunk(b'IEND', b'')
+    return sig + ihdr + idat + iend
 
 def get_missing_layers(i3d_content):
     """Return the SOIL_LAYERS entries whose InfoLayer is NOT yet in the i3d."""
@@ -178,6 +166,7 @@ def get_missing_layers(i3d_content):
         layer for layer in SOIL_LAYERS
         if f'name="{layer["name"]}"' not in i3d_content
         and f'infoLayer_{layer["name"]}.grle' not in i3d_content
+        and f'infoLayer_{layer["name"]}.png' not in i3d_content
     ]
 
 def already_patched(i3d_content):
@@ -288,11 +277,10 @@ def main():
         data_dir = get_data_dir(i3d_path)
         print(f"Data dir : {data_dir}")
 
-        # 6. Always use a generated blank 1024×1024 GRLE so soil layers are
-        #    the correct resolution regardless of which map is being patched.
-        blank_grle_data   = make_blank_grle_1024()
-        blank_grle_source = "<generated blank 1024×1024>"
-        print(f"\nBlank GRLE: {blank_grle_source} ({len(blank_grle_data):,} bytes)")
+        # 6. Generate a blank 1024×1024 8-bit grayscale PNG for each new layer.
+        #    PNG is unambiguous: 8 bits per pixel matches numChannels=8 in the i3d.
+        blank_data = make_blank_png_1024()
+        print(f"\nBlank PNG: <generated 1024×1024 grayscale> ({len(blank_data):,} bytes)")
 
         # Snapshot all existing files so we can repack
         existing_files = {}
@@ -317,12 +305,12 @@ def main():
         fid  = max_fid + 1 + i
         name = layer["name"]
         nc   = layer["numChannels"]
-        grle_zip_path = f"{data_dir}infoLayer_{name}.grle"
-        i3d_rel_path  = f"data/infoLayer_{name}.grle"
+        png_zip_path = f"{data_dir}infoLayer_{name}.png"
+        i3d_rel_path = f"data/infoLayer_{name}.png"
 
         new_file_entries.append((fid, i3d_rel_path))
         new_layer_entries.append((name, fid, nc))
-        new_grle_files[grle_zip_path] = blank_grle_data
+        new_grle_files[png_zip_path] = blank_data
 
     print(f"\nAssigning fileIds {max_fid+1} – {max_fid+len(missing_layers)} for new layers")
     for (name, fid, nc), (_, i3d_fn) in zip(new_layer_entries, new_file_entries):
@@ -363,16 +351,16 @@ def main():
         ok = True
         for layer in SOIL_LAYERS:
             name = layer["name"]
-            grle = f"{data_dir}infoLayer_{name}.grle"
+            png  = f"{data_dir}infoLayer_{name}.png"
             if f'name="{name}"' in i3d_check:
                 print(f"  [OK] InfoLayer name={name!r} in i3d")
             else:
                 print(f"  [!!] MISSING: InfoLayer name={name!r}")
                 ok = False
-            if grle in z.namelist():
-                print(f"  [OK] {grle} present in zip")
+            if png in z.namelist():
+                print(f"  [OK] {png} present in zip")
             else:
-                print(f"  [!!] MISSING: {grle}")
+                print(f"  [!!] MISSING: {png}")
                 ok = False
 
     print()

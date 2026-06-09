@@ -4,11 +4,11 @@ FS25 SoilFertilizer — Soil Layer Installer  (GUI v2)
 Tabbed UI: Installer | Settings | Log
 """
 
-import os, re, shutil, struct, zipfile, threading, datetime
+import os, re, shutil, struct, zipfile, threading, datetime, zlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -163,9 +163,7 @@ SOIL_LAYERS = [
     {"name": "soilCompaction", "numChannels": 8},
     # Note: weed is NOT created here — it is read from the game's native weed density map
 ]
-BLANK_GRLE_SOURCE = "maps/data/infoLayer_fieldType.grle"
-
-# ── Core patching helpers (UNCHANGED) ─────────────────────────────────────────
+# ── Core patching helpers ─────────────────────────────────────────────────────
 
 def find_map_id(savegame_dir):
     career = os.path.join(savegame_dir, "careerSavegame.xml")
@@ -221,7 +219,7 @@ def find_i3d_path(z):
 
 
 def get_data_dir(i3d_path):
-    """Return the zip-absolute data directory for GRLE files, derived from the i3d location.
+    """Return the zip-absolute data directory for layer files, derived from the i3d location.
 
     Examples:
       maps/mapEU.i3d  → maps/data/
@@ -234,33 +232,24 @@ def get_data_dir(i3d_path):
         i3d_folder = ""
     return i3d_folder + "data/"
 
-def get_grle_width(data):
-    """Return the width in pixels from a GRLE file header, or None if unrecognized."""
-    if len(data) < 8 or data[:4] != b'GRLE':
-        return None
-    units = struct.unpack_from('<H', data, 6)[0]
-    return units * 256 if units > 0 else None
+def make_blank_png_1024():
+    """Generate a blank 1024×1024 8-bit grayscale PNG (all zeros).
 
-def make_blank_grle_1024():
-    """Generate a blank 1024×1024 GRLE with 8 channels (all zeros).
-
-    Header layout (17 bytes): GRLE magic, version=1, width/256=4, padding,
-    height/256=4, fixed bytes 12-16.
-    Preamble (6 bytes): observed on all blank layers in game data.
-    RLE: 4112 × 0xFF (255 zeros each) + 0x10 (16 zeros)
-         = 4112 × 255 + 16 = 1,048,576 = 1024 × 1024 zero bytes.
+    Uses only Python stdlib (zlib + struct). FS25 reads this as 8 bits per
+    pixel, which matches numChannels=8 declared in the i3d InfoLayer entry.
     """
-    header = (
-        b'GRLE'
-        + b'\x01\x00'                # version
-        + b'\x04\x00'                # width / 256 = 4 → 1024 px
-        + b'\x00\x00'                # padding
-        + b'\x04\x00'                # height / 256 = 4 → 1024 px
-        + b'\x00\x01\x00\x00\x00'   # bytes 12-16 (constant across all GRLEs)
-    )
-    preamble = b'\x03\x01\x01\x00\x00\x00'
-    rle = b'\xff' * 4112 + b'\x10'
-    return header + preamble + rle
+    W = H = 1024
+
+    def _chunk(tag, data):
+        c = tag + data
+        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xFFFFFFFF)
+
+    sig  = b'\x89PNG\r\n\x1a\n'
+    ihdr = _chunk(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 0, 0, 0, 0))
+    raw  = (b'\x00' + b'\x00' * W) * H   # filter byte + row pixels, repeated
+    idat = _chunk(b'IDAT', zlib.compress(raw, 9))
+    iend = _chunk(b'IEND', b'')
+    return sig + ihdr + idat + iend
 
 def get_missing_layers(i3d_content):
     """Return SOIL_LAYERS entries whose InfoLayer is not yet present in the i3d."""
@@ -268,6 +257,7 @@ def get_missing_layers(i3d_content):
         layer for layer in SOIL_LAYERS
         if f'name="{layer["name"]}"' not in i3d_content
         and f'infoLayer_{layer["name"]}.grle' not in i3d_content
+        and f'infoLayer_{layer["name"]}.png' not in i3d_content
     ]
 
 def already_patched(i3d_content):
@@ -437,9 +427,9 @@ def run_installer_base_game(sg, log, force=False):
     else:
         log("INFO", f"Adding all {len(SOIL_LAYERS)} layers.")
 
-    # Always generate a blank 1024×1024 GRLE — correct resolution for soil layers.
-    blank = make_blank_grle_1024()
-    log("DEBUG", f"GRLE template: generated blank 1024×1024 ({len(blank):,} bytes)")
+    # Generate a blank 1024×1024 8-bit grayscale PNG for each new layer.
+    blank = make_blank_png_1024()
+    log("DEBUG", f"PNG template: generated blank 1024×1024 ({len(blank):,} bytes)")
 
     # Backup i3d
     bp = i3d_path + ".backup_soilinstaller"
@@ -457,7 +447,7 @@ def run_installer_base_game(sg, log, force=False):
         fid  = max_fid + 1 + idx
         name = layer["name"]
         nc   = layer["numChannels"]
-        fe.append((fid, f"data/infoLayer_{name}.grle"))
+        fe.append((fid, f"data/infoLayer_{name}.png"))
         le.append((name, fid, nc))
 
     log("INFO", f"Adding {len(missing)} layer(s) (IDs {max_fid+1}–{max_fid+len(missing)}):")
@@ -470,13 +460,13 @@ def run_installer_base_game(sg, log, force=False):
         f.write(patched_i3d)
     log("DEBUG", "i3d updated.")
 
-    # Write blank GRLE files (only for newly added layers)
+    # Write blank PNG files (only for newly added layers)
     os.makedirs(data_dir, exist_ok=True)
     for layer in missing:
-        grle_path = os.path.join(data_dir, f"infoLayer_{layer['name']}.grle")
-        with open(grle_path, "wb") as f:
+        png_path = os.path.join(data_dir, f"infoLayer_{layer['name']}.png")
+        with open(png_path, "wb") as f:
             f.write(blank)
-        log("DEBUG", f"  + {os.path.basename(grle_path)}")
+        log("DEBUG", f"  + {os.path.basename(png_path)}")
 
     # Verify
     log("INFO", "Verifying…")
@@ -484,9 +474,9 @@ def run_installer_base_game(sg, log, force=False):
     with open(i3d_path, encoding="utf-8-sig", errors="ignore") as f:
         check = f.read()
     for layer in SOIL_LAYERS:
-        n    = layer["name"]
-        grle = os.path.join(data_dir, f"infoLayer_{n}.grle")
-        good = (f'name="{n}"' in check) and os.path.exists(grle)
+        n   = layer["name"]
+        png = os.path.join(data_dir, f"infoLayer_{n}.png")
+        good = (f'name="{n}"' in check) and os.path.exists(png)
         log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
         if not good:
             ok = False
@@ -527,10 +517,9 @@ def run_installer_zip(sg, log, force=False):
         data_dir = get_data_dir(i3d_path)
         log("DEBUG", f"Data dir : {data_dir}")
 
-        # Always generate a blank 1024×1024 GRLE — correct resolution for soil layers.
-        blank     = make_blank_grle_1024()
-        blank_src = "<generated blank 1024×1024>"
-        log("DEBUG", f"GRLE template : {blank_src} ({len(blank):,} bytes)")
+        # Generate a blank 1024×1024 8-bit grayscale PNG for each new layer.
+        blank = make_blank_png_1024()
+        log("DEBUG", f"PNG template: generated blank 1024×1024 ({len(blank):,} bytes)")
 
         all_names = z.namelist()
         snapshot = {item: z.read(item) for item in all_names}
@@ -549,9 +538,9 @@ def run_installer_zip(sg, log, force=False):
         fid  = max_fid + 1 + idx
         name = layer["name"]
         nc   = layer["numChannels"]
-        fe.append((fid, f"data/infoLayer_{name}.grle"))
+        fe.append((fid, f"data/infoLayer_{name}.png"))
         le.append((name, fid, nc))
-        gf[f"{data_dir}infoLayer_{name}.grle"] = blank
+        gf[f"{data_dir}infoLayer_{name}.png"] = blank
 
     log("INFO", f"Adding {len(missing)} layer(s) (IDs {max_fid+1}–{max_fid+len(missing)}):")
     for name, fid, _ in le:
@@ -575,9 +564,9 @@ def run_installer_zip(sg, log, force=False):
         check = z.read(i3d_path).decode("utf-8-sig", errors="ignore")
         names = z.namelist()
         for layer in SOIL_LAYERS:
-            n    = layer["name"]
-            grle = f"{data_dir}infoLayer_{n}.grle"
-            good = (f'name="{n}"' in check) and (grle in names)
+            n   = layer["name"]
+            png = f"{data_dir}infoLayer_{n}.png"
+            good = (f'name="{n}"' in check) and (png in names)
             log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
             if not good:
                 ok = False

@@ -8,7 +8,7 @@ import os, re, shutil, struct, zipfile, threading, datetime, zlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.8"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -337,6 +337,7 @@ def scan_savegames(saves_dir, mods_dir, game_dir, log):
         game_i3d    = None
         game_data   = None
         patched     = None
+        has_pngs    = False
         has_backup  = False
         backup_path = None
 
@@ -356,9 +357,16 @@ def scan_savegames(saves_dir, mods_dir, game_dir, log):
                     with zipfile.ZipFile(zip_path, "r") as z:
                         i3d = find_i3d_path(z)
                         if i3d:
-                            raw     = z.read(i3d).decode("utf-8-sig", errors="ignore")
-                            patched = already_patched(raw)
-                            log("DEBUG", f"  i3d={i3d}  patched={patched}  backup={has_backup}")
+                            raw      = z.read(i3d).decode("utf-8-sig", errors="ignore")
+                            patched  = already_patched(raw)
+                            dd       = get_data_dir(i3d)
+                            all_n    = z.namelist()
+                            has_pngs = any(
+                                f"{dd}infoLayer_{l['name']}.png" in all_n
+                                for l in SOIL_LAYERS
+                            )
+                            log("DEBUG", f"  i3d={i3d}  patched={patched}"
+                                         f"  pngs={has_pngs}  backup={has_backup}")
                 except Exception as e:
                     log("WARNING", f"  Could not inspect ZIP: {e}")
             else:
@@ -393,6 +401,7 @@ def scan_savegames(saves_dir, mods_dir, game_dir, log):
             "game_i3d":     game_i3d,
             "game_data_dir": game_data,
             "patched":      patched,
+            "has_pngs":     has_pngs,
             "has_backup":   has_backup,
             "backup_path":  backup_path,
         })
@@ -412,14 +421,24 @@ def run_installer_base_game(sg, log, force=False):
         raw = f.read()
 
     missing = get_missing_layers(raw)
-    if not missing and not force:
-        log("INFO", "Map is already fully patched (all 8 layers present) — nothing to do.")
+
+    # Find existing soil PNG files — always replace them with fresh blanks
+    existing_pngs = [
+        os.path.join(data_dir, f"infoLayer_{layer['name']}.png")
+        for layer in SOIL_LAYERS
+        if os.path.exists(os.path.join(data_dir, f"infoLayer_{layer['name']}.png"))
+    ]
+
+    if not missing and not existing_pngs and not force:
+        log("INFO", "Map is already fully patched and layer PNG files are clean — nothing to do.")
         return True, "already_patched"
 
     if force:
-        missing = SOIL_LAYERS  # re-patch all when forced
+        missing = SOIL_LAYERS
 
-    if len(missing) < len(SOIL_LAYERS):
+    if not missing:
+        log("INFO", f"i3d already patched. Replacing {len(existing_pngs)} stale PNG file(s).")
+    elif len(missing) < len(SOIL_LAYERS):
         present = len(SOIL_LAYERS) - len(missing)
         log("INFO", f"Partial patch: {present}/8 layers already present.")
         log("INFO", f"Adding {len(missing)} missing layer(s): "
@@ -427,7 +446,6 @@ def run_installer_base_game(sg, log, force=False):
     else:
         log("INFO", f"Adding all {len(SOIL_LAYERS)} layers.")
 
-    # Generate a blank 1024×1024 8-bit grayscale PNG for each new layer.
     blank = make_blank_png_1024()
     log("DEBUG", f"PNG template: generated blank 1024×1024 ({len(blank):,} bytes)")
 
@@ -439,30 +457,36 @@ def run_installer_base_game(sg, log, force=False):
     else:
         log("DEBUG", "Backup already exists — skipping.")
 
-    # Patch
-    max_fid = get_max_file_id(raw)
-    log("DEBUG", f"Max existing fileId: {max_fid}")
-    fe, le = [], []
-    for idx, layer in enumerate(missing):
-        fid  = max_fid + 1 + idx
-        name = layer["name"]
-        nc   = layer["numChannels"]
-        fe.append((fid, f"data/infoLayer_{name}.png"))
-        le.append((name, fid, nc))
+    # Patch i3d only for missing layers
+    patched_i3d = raw
+    if missing:
+        max_fid = get_max_file_id(raw)
+        log("DEBUG", f"Max existing fileId: {max_fid}")
+        fe, le = [], []
+        for idx, layer in enumerate(missing):
+            fid  = max_fid + 1 + idx
+            name = layer["name"]
+            nc   = layer["numChannels"]
+            fe.append((fid, f"data/infoLayer_{name}.png"))
+            le.append((name, fid, nc))
+        log("INFO", f"Adding {len(missing)} i3d layer entries (IDs {max_fid+1}–{max_fid+len(missing)}):")
+        for name, fid, _ in le:
+            log("INFO", f"  + {name}  (id={fid})")
+        patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le, log)
+        with open(i3d_path, "w", encoding="utf-8") as f:
+            f.write(patched_i3d)
+        log("DEBUG", "i3d updated.")
 
-    log("INFO", f"Adding {len(missing)} layer(s) (IDs {max_fid+1}–{max_fid+len(missing)}):")
-    for name, fid, _ in le:
-        log("INFO", f"  + {name}  (id={fid})")
-
-    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le, log)
-
-    with open(i3d_path, "w", encoding="utf-8") as f:
-        f.write(patched_i3d)
-    log("DEBUG", "i3d updated.")
-
-    # Write blank PNG files (only for newly added layers)
+    # Remove stale PNG files first, then write fresh blanks for ALL layers
     os.makedirs(data_dir, exist_ok=True)
-    for layer in missing:
+    for png_path in existing_pngs:
+        try:
+            os.remove(png_path)
+            log("DEBUG", f"  - removed stale: {os.path.basename(png_path)}")
+        except Exception as e:
+            log("WARNING", f"  Could not remove {os.path.basename(png_path)}: {e}")
+
+    for layer in SOIL_LAYERS:
         png_path = os.path.join(data_dir, f"infoLayer_{layer['name']}.png")
         with open(png_path, "wb") as f:
             f.write(blank)
@@ -480,7 +504,9 @@ def run_installer_base_game(sg, log, force=False):
         log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
         if not good:
             ok = False
-    return ok, "patched"
+
+    result = "patched" if missing else "png_refreshed"
+    return ok, result
 
 # ── Mod-map installer (ZIP-based) ─────────────────────────────────────────────
 
@@ -496,15 +522,29 @@ def run_installer_zip(sg, log, force=False):
         log("DEBUG", f"i3d file : {i3d_path}")
         raw = z.read(i3d_path).decode("utf-8-sig", errors="ignore")
 
-        missing = get_missing_layers(raw)
-        if not missing and not force:
-            log("INFO", "Map is already fully patched (all 8 layers present) — nothing to do.")
+        missing  = get_missing_layers(raw)
+        data_dir = get_data_dir(i3d_path)
+        log("DEBUG", f"Data dir : {data_dir}")
+
+        all_names = z.namelist()
+
+        # Identify existing soil PNG files — they will be removed and replaced with fresh blanks.
+        stale_pngs = {
+            n for n in all_names
+            if any(f"infoLayer_{l['name']}.png" in n for l in SOIL_LAYERS)
+            and n.startswith(data_dir)
+        }
+
+        if not missing and not stale_pngs and not force:
+            log("INFO", "Map is already fully patched and layer PNG files are clean — nothing to do.")
             return True, "already_patched"
 
         if force:
-            missing = SOIL_LAYERS  # re-patch all when forced
+            missing = SOIL_LAYERS
 
-        if len(missing) < len(SOIL_LAYERS):
+        if not missing:
+            log("INFO", f"i3d already patched. Replacing {len(stale_pngs)} stale PNG file(s).")
+        elif len(missing) < len(SOIL_LAYERS):
             present = len(SOIL_LAYERS) - len(missing)
             log("INFO", f"Partial patch: {present}/8 layers already present.")
             log("INFO", f"Adding {len(missing)} missing layer(s): "
@@ -512,17 +552,14 @@ def run_installer_zip(sg, log, force=False):
         else:
             log("INFO", f"Adding all {len(SOIL_LAYERS)} layers.")
 
-        # Derive the data directory from the actual i3d location so maps that
-        # use map/, maps/, or a custom folder all work correctly.
-        data_dir = get_data_dir(i3d_path)
-        log("DEBUG", f"Data dir : {data_dir}")
+        if stale_pngs:
+            log("INFO", f"Removing {len(stale_pngs)} stale PNG file(s) before repacking.")
 
-        # Generate a blank 1024×1024 8-bit grayscale PNG for each new layer.
         blank = make_blank_png_1024()
         log("DEBUG", f"PNG template: generated blank 1024×1024 ({len(blank):,} bytes)")
 
-        all_names = z.namelist()
-        snapshot = {item: z.read(item) for item in all_names}
+        # Snapshot all files EXCEPT stale soil PNGs (they will be replaced by fresh ones).
+        snapshot = {item: z.read(item) for item in all_names if item not in stale_pngs}
 
     bp = zip_path + ".backup_soilinstaller"
     if not os.path.exists(bp):
@@ -531,22 +568,25 @@ def run_installer_zip(sg, log, force=False):
     else:
         log("DEBUG", "Backup already exists — skipping.")
 
-    max_fid = get_max_file_id(raw)
-    log("DEBUG", f"Max existing fileId: {max_fid}")
-    fe, le, gf = [], [], {}
-    for idx, layer in enumerate(missing):
-        fid  = max_fid + 1 + idx
-        name = layer["name"]
-        nc   = layer["numChannels"]
-        fe.append((fid, f"data/infoLayer_{name}.png"))
-        le.append((name, fid, nc))
-        gf[f"{data_dir}infoLayer_{name}.png"] = blank
+    # Patch i3d only for missing layers
+    patched_i3d = raw
+    if missing:
+        max_fid = get_max_file_id(raw)
+        log("DEBUG", f"Max existing fileId: {max_fid}")
+        fe, le = [], []
+        for idx, layer in enumerate(missing):
+            fid  = max_fid + 1 + idx
+            name = layer["name"]
+            nc   = layer["numChannels"]
+            fe.append((fid, f"data/infoLayer_{name}.png"))
+            le.append((name, fid, nc))
+        log("INFO", f"Adding {len(missing)} i3d layer entries (IDs {max_fid+1}–{max_fid+len(missing)}):")
+        for name, fid, _ in le:
+            log("INFO", f"  + {name}  (id={fid})")
+        patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le, log)
 
-    log("INFO", f"Adding {len(missing)} layer(s) (IDs {max_fid+1}–{max_fid+len(missing)}):")
-    for name, fid, _ in le:
-        log("INFO", f"  + {name}  (id={fid})")
-
-    patched_i3d = patch_infolayer_section(patch_files_section(raw, fe), le, log)
+    # Always write fresh PNGs for ALL soil layers.
+    gf = {f"{data_dir}infoLayer_{layer['name']}.png": blank for layer in SOIL_LAYERS}
 
     log("INFO", "Repacking ZIP…")
     tmp = zip_path + ".tmp"
@@ -555,6 +595,7 @@ def run_installer_zip(sg, log, force=False):
             zout.writestr(p, patched_i3d.encode("utf-8") if p == i3d_path else d)
         for p, d in gf.items():
             zout.writestr(p, d)
+            log("DEBUG", f"  + {p}")
     os.replace(tmp, zip_path)
     log("DEBUG", "ZIP replaced successfully.")
 
@@ -570,7 +611,9 @@ def run_installer_zip(sg, log, force=False):
             log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
             if not good:
                 ok = False
-    return ok, "patched"
+
+    result = "patched" if missing else "png_refreshed"
+    return ok, result
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 
@@ -718,6 +761,7 @@ class InstallerApp(tk.Tk):
         vsb.grid(row=0, column=1, sticky="ns")
 
         self._tree.tag_configure("patched",   foreground=GREEN)
+        self._tree.tag_configure("repair",    foreground=ORANGE)
         self._tree.tag_configure("ready",     foreground=BLUE)
         self._tree.tag_configure("no_zip",    foreground=YELLOW)
         self._tree.tag_configure("base_game", foreground=BLUE)
@@ -947,6 +991,8 @@ class InstallerApp(tk.Tk):
     def _status_for(self, sg):
         """Return (display_string, tag_name) for a savegame dict."""
         if sg["patched"] is True:
+            if sg.get("has_pngs"):
+                return ("⚠  Repair PNGs", "repair")
             return ("✓  Patched", "patched")
         if sg.get("is_base_game"):
             return ("○  Ready",   "base_game")
@@ -1055,6 +1101,10 @@ class InstallerApp(tk.Tk):
             self._btn_run.config(state="disabled", bg=DIM, fg=BG,
                                   text="✗  Map ZIP Not Found", cursor="arrow")
             return
+        if sg["patched"] and sg.get("has_pngs"):
+            self._btn_run.config(state="normal", bg=ORANGE, fg=BG,
+                                  text="⚠  Repair PNG files", cursor="hand2")
+            return
         if sg["patched"] and not self._force_patch.get():
             self._btn_run.config(state="disabled", bg=DIM, fg=BG,
                                   text="✓  Already Patched", cursor="arrow")
@@ -1160,6 +1210,12 @@ class InstallerApp(tk.Tk):
             self._set_status("Already patched — nothing changed.", DIM)
             messagebox.showinfo("Nothing to do",
                 "This map is already patched!\n\nYou can load your savegame right now.")
+        elif result == "png_refreshed" and ok:
+            self._log("OK", "Layer PNG files refreshed successfully!")
+            self._set_status("PNG files refreshed. Launch FS25 and load your save.", GREEN)
+            messagebox.showinfo("PNG files refreshed",
+                "Stale soil layer PNG files have been removed and replaced with fresh ones.\n\n"
+                "Launch Farming Simulator 25 and load your savegame.")
         elif ok:
             self._log("OK", "Patch applied successfully!")
             self._set_status("Patch applied. Launch FS25 and load your save.", GREEN)

@@ -8,7 +8,7 @@ import os, re, shutil, struct, zipfile, threading, datetime, zlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.9"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -361,8 +361,12 @@ def scan_savegames(saves_dir, mods_dir, game_dir, log):
                             patched  = already_patched(raw)
                             dd       = get_data_dir(i3d)
                             all_n    = z.namelist()
+                            # "stale" PNG = exists but is NOT our blank (blank is <1 KB;
+                            # real/wrong textures are orders of magnitude larger)
                             has_pngs = any(
-                                f"{dd}infoLayer_{l['name']}.png" in all_n
+                                (lambda n: n in all_n and z.getinfo(n).file_size > 5000)(
+                                    f"{dd}infoLayer_{l['name']}.png"
+                                )
                                 for l in SOIL_LAYERS
                             )
                             log("DEBUG", f"  i3d={i3d}  patched={patched}"

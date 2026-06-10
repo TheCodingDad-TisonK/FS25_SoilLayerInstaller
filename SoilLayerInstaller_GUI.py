@@ -8,7 +8,7 @@ import os, re, shutil, struct, zipfile, threading, datetime, zlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -522,7 +522,6 @@ def run_installer_zip(sg, log, force=False):
         log("DEBUG", f"PNG template: generated blank 1024×1024 ({len(blank):,} bytes)")
 
         all_names = z.namelist()
-        snapshot = {item: z.read(item) for item in all_names}
 
     bp = zip_path + ".backup_soilinstaller"
     if not os.path.exists(bp):
@@ -550,9 +549,13 @@ def run_installer_zip(sg, log, force=False):
 
     log("INFO", "Repacking ZIP…")
     tmp = zip_path + ".tmp"
-    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
-        for p, d in snapshot.items():
-            zout.writestr(p, patched_i3d.encode("utf-8") if p == i3d_path else d)
+    with zipfile.ZipFile(zip_path, "r") as zin, \
+         zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zout:
+        for p in all_names:
+            if p == i3d_path:
+                zout.writestr(p, patched_i3d.encode("utf-8"))
+            else:
+                zout.writestr(p, zin.read(p))
         for p, d in gf.items():
             zout.writestr(p, d)
     os.replace(tmp, zip_path)

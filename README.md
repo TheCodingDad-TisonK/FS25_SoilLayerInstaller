@@ -16,7 +16,7 @@
 
 By default, [FS25_SoilFertilizer](https://github.com/TheCodingDad-TisonK/FS25_SoilFertilizer) tracks one average nutrient value per field. Spray the left half of a field with nitrogen and the whole field shows the same number — because the game doesn't have individual pixel layers for soil nutrients until you add them.
 
-This tool patches your active map mod to add eight density-map layers:
+This tool patches your active map mod to add nine density-map layers:
 
 | Layer | Tracks |
 |---|---|
@@ -28,6 +28,7 @@ This tool patches your active map mod to add eight density-map layers:
 | `soilPest` | Pest pressure |
 | `soilDisease` | Disease pressure |
 | `soilCompaction` | Soil compaction |
+| `soilYield` | Yield potential (field-average) |
 
 Once the patch is applied, the soil overlay map shows real per-pixel values — spray half a field and you'll see a visible left/right split on the map.
 
@@ -69,9 +70,9 @@ The installer finds your savegame and map automatically. No folder browsing requ
 
 1. Reads your active savegame to identify which map mod you're using
 2. Creates a backup of the map mod ZIP before touching anything
-3. Patches the map's `.i3d` file inside the ZIP — adds eight `<File>` and `<InfoLayer>` entries
+3. Patches the map's `.i3d` file inside the ZIP — adds one `<File>` and `<InfoLayer>` entry per layer
 4. Generates a blank 1024×1024 GRLE (all zeros) as the starting data for each new layer
-5. Repacks the ZIP and verifies all eight layers are present
+5. Repacks the ZIP and verifies all nine layers are present
 
 On next game load, the engine registers the new layers automatically. FS25_SoilFertilizer detects them and switches from field-average mode to per-pixel mode.
 

@@ -161,6 +161,8 @@ SOIL_LAYERS = [
     {"name": "soilPest",       "numChannels": 8},
     {"name": "soilDisease",    "numChannels": 8},
     {"name": "soilCompaction", "numChannels": 8},
+    # Derived yield (field-uniform) — painted per field from field-average N/P/K
+    {"name": "soilYield",      "numChannels": 8},
     # Note: weed is NOT created here — it is read from the game's native weed density map
 ]
 # ── Core patching helpers ─────────────────────────────────────────────────────
@@ -261,7 +263,7 @@ def get_missing_layers(i3d_content):
     ]
 
 def already_patched(i3d_content):
-    """Return True only if ALL 8 soil layers are present in the i3d."""
+    """Return True only if ALL soil layers are present in the i3d."""
     return len(get_missing_layers(i3d_content)) == 0
 
 def get_max_file_id(i3d_content):
@@ -444,7 +446,7 @@ def run_installer_base_game(sg, log, force=False):
         log("INFO", f"i3d already patched. Replacing {len(existing_pngs)} stale PNG file(s).")
     elif len(missing) < len(SOIL_LAYERS):
         present = len(SOIL_LAYERS) - len(missing)
-        log("INFO", f"Partial patch: {present}/8 layers already present.")
+        log("INFO", f"Partial patch: {present}/{len(SOIL_LAYERS)} layers already present.")
         log("INFO", f"Adding {len(missing)} missing layer(s): "
                     + ", ".join(l["name"] for l in missing))
     else:
@@ -550,7 +552,7 @@ def run_installer_zip(sg, log, force=False):
             log("INFO", f"i3d already patched. Replacing {len(stale_pngs)} stale PNG file(s).")
         elif len(missing) < len(SOIL_LAYERS):
             present = len(SOIL_LAYERS) - len(missing)
-            log("INFO", f"Partial patch: {present}/8 layers already present.")
+            log("INFO", f"Partial patch: {present}/{len(SOIL_LAYERS)} layers already present.")
             log("INFO", f"Adding {len(missing)} missing layer(s): "
                         + ", ".join(l["name"] for l in missing))
         else:

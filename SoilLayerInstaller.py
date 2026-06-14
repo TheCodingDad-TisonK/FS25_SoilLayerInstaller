@@ -8,8 +8,9 @@ HOW IT WORKS
   1. Finds the active savegame and identifies the current map mod zip.
   2. Backs up the original zip.
   3. Patches maps/mapEU.i3d inside the zip:
-       - Adds 5 File entries for the new GRLE data files.
-       - Adds 8 InfoLayer entries (soilN / soilP / soilK / soilPH / soilOM / soilPest / soilDisease / soilCompaction).
+       - Adds one File entry per new GRLE/PNG data file.
+       - Adds an InfoLayer entry per layer in SOIL_LAYERS (soilN / soilP / soilK /
+         soilPH / soilOM / soilPest / soilDisease / soilCompaction / soilYield).
   4. Copies an existing blank GRLE from the zip as the initial data for
      each new layer (all zeros = safe starting state).
   5. On the next game load the engine auto-creates/registers the layers.
@@ -45,7 +46,7 @@ _DOCS    = _get_documents_dir()
 MODS_DIR  = os.path.join(_DOCS, "My Games", "FarmingSimulator2025", "mods")
 SAVES_DIR = os.path.join(_DOCS, "My Games", "FarmingSimulator2025")
 
-# The 5 soil layers we inject.  Name = i3d short name (engine prefixes infoLayer_).
+# The soil layers we inject.  Name = i3d short name (engine prefixes infoLayer_).
 SOIL_LAYERS = [
     # Nutrients
     {"name": "soilN",          "field": "nitrogen",        "numChannels": 8},
@@ -57,6 +58,10 @@ SOIL_LAYERS = [
     {"name": "soilPest",       "field": "pestPressure",    "numChannels": 8},
     {"name": "soilDisease",    "field": "diseasePressure", "numChannels": 8},
     {"name": "soilCompaction", "field": "compaction",      "numChannels": 8},
+    # Derived yield (field-uniform): painted uniformly per field from field-average
+    # N/P/K via SF's _yieldModifierFromNutrients. Stored so the overlay renders it
+    # the same way as the nutrient layers.
+    {"name": "soilYield",      "field": "yieldEfficiency", "numChannels": 8},
     # weed: read-only from game's native weed density map — not installed here
 ]
 
@@ -170,7 +175,7 @@ def get_missing_layers(i3d_content):
     ]
 
 def already_patched(i3d_content):
-    """Return True only if ALL 8 soil layers are present in the i3d."""
+    """Return True only if ALL soil layers are present in the i3d."""
     return len(get_missing_layers(i3d_content)) == 0
 
 def get_max_file_id(i3d_content):
@@ -260,13 +265,13 @@ def main():
         # 5. Check which layers are missing
         missing_layers = get_missing_layers(i3d_content)
         if not missing_layers:
-            print("\nMap is already fully patched (all 8 layers present). Nothing to do.")
+            print(f"\nMap is already fully patched (all {len(SOIL_LAYERS)} layers present). Nothing to do.")
             print("If you need to re-patch, restore the backup zip and re-run.")
             sys.exit(0)
 
         if len(missing_layers) < len(SOIL_LAYERS):
             present = len(SOIL_LAYERS) - len(missing_layers)
-            print(f"\nPartial patch detected: {present}/8 layers present.")
+            print(f"\nPartial patch detected: {present}/{len(SOIL_LAYERS)} layers present.")
             print(f"Adding {len(missing_layers)} missing layer(s): "
                   + ", ".join(l["name"] for l in missing_layers))
         else:
@@ -365,7 +370,7 @@ def main():
 
     print()
     if ok:
-        print("SUCCESS — all 8 soil layers injected.")
+        print(f"SUCCESS — all {len(SOIL_LAYERS)} soil layers injected.")
         print()
         print("NEXT STEPS:")
         print("  1. Reload FS25 (or load your savegame).")

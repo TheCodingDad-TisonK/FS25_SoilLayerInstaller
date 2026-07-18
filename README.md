@@ -113,6 +113,8 @@ Re-running the installer on a fully patched map shows **Already Patched ✓** an
 
 If your map was patched by an older version of this tool (which only added the 5 nutrient layers), the installer will detect the missing layers and add them automatically — no backup restore needed.
 
+If an older version wrote the soil layers into your map more than once (duplicate layer entries that break the map), the installer now detects the duplicates and rebuilds the map from its clean backup, leaving exactly one set of layers. This needs the original `.backup_soilinstaller` file to still be present.
+
 ---
 
 ## Troubleshooting

@@ -8,7 +8,7 @@ import os, re, shutil, struct, zipfile, threading, datetime, zlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 # ── Palette (Catppuccin Mocha) ─────────────────────────────────────────────────
 BG      = "#1e1e2e"
@@ -266,6 +266,18 @@ def already_patched(i3d_content):
     """Return True only if ALL soil layers are present in the i3d."""
     return len(get_missing_layers(i3d_content)) == 0
 
+def count_duplicate_soil_layers(i3d_content):
+    """Return how many soil InfoLayer names appear more than once in the i3d.
+
+    Older installer versions appended the soil layers on every run, so a map
+    patched N times ends up with N copies of each InfoLayer entry, which
+    corrupts the map. A count > 0 means the i3d needs repairing.
+    """
+    return sum(
+        1 for layer in SOIL_LAYERS
+        if i3d_content.count(f'name="{layer["name"]}"') > 1
+    )
+
 def get_max_file_id(i3d_content):
     ids = [int(m) for m in re.findall(r'fileId="(\d+)"', i3d_content)]
     return max(ids) if ids else 1000
@@ -428,6 +440,23 @@ def run_installer_base_game(sg, log, force=False):
 
     missing = get_missing_layers(raw)
 
+    # Self-heal: older installer versions appended the soil layers on every run,
+    # leaving duplicate InfoLayer entries that corrupt the map. If duplicates are
+    # detected and the pristine backup exists, re-base the patch on that backup so
+    # the i3d is rebuilt with exactly one clean set of layers.
+    bp = i3d_path + ".backup_soilinstaller"
+    dupes = count_duplicate_soil_layers(raw)
+    if dupes:
+        if os.path.exists(bp):
+            log("WARNING", f"Found {dupes} duplicated soil layer(s) from a previous install — "
+                           f"rebuilding the i3d from the clean backup.")
+            with open(bp, encoding="utf-8-sig", errors="ignore") as f:
+                raw = f.read()
+            missing = get_missing_layers(raw)
+        else:
+            log("WARNING", f"Found {dupes} duplicated soil layer(s) but no backup exists — "
+                           f"cannot auto-repair. Reinstall the map, then patch once.")
+
     # Find existing soil PNG files — always replace them with fresh blanks
     existing_pngs = [
         os.path.join(data_dir, f"infoLayer_{layer['name']}.png")
@@ -435,7 +464,7 @@ def run_installer_base_game(sg, log, force=False):
         if os.path.exists(os.path.join(data_dir, f"infoLayer_{layer['name']}.png"))
     ]
 
-    if not missing and not existing_pngs and not force:
+    if not missing and not existing_pngs and not dupes and not force:
         log("INFO", "Map is already fully patched and layer PNG files are clean — nothing to do.")
         return True, "already_patched"
 
@@ -506,7 +535,7 @@ def run_installer_base_game(sg, log, force=False):
     for layer in SOIL_LAYERS:
         n   = layer["name"]
         png = os.path.join(data_dir, f"infoLayer_{n}.png")
-        good = (f'name="{n}"' in check) and os.path.exists(png)
+        good = (check.count(f'name="{n}"') == 1) and os.path.exists(png)
         log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
         if not good:
             ok = False
@@ -529,6 +558,7 @@ def run_installer_zip(sg, log, force=False):
         raw = z.read(i3d_path).decode("utf-8-sig", errors="ignore")
 
         missing  = get_missing_layers(raw)
+        dupes    = count_duplicate_soil_layers(raw)
         data_dir = get_data_dir(i3d_path)
         log("DEBUG", f"Data dir : {data_dir}")
 
@@ -541,7 +571,7 @@ def run_installer_zip(sg, log, force=False):
             and n.startswith(data_dir)
         }
 
-        if not missing and not stale_pngs and not force:
+        if not missing and not stale_pngs and not dupes and not force:
             log("INFO", "Map is already fully patched and layer PNG files are clean — nothing to do.")
             return True, "already_patched"
 
@@ -568,6 +598,24 @@ def run_installer_zip(sg, log, force=False):
         snapshot = {item: z.read(item) for item in all_names if item not in stale_pngs}
 
     bp = zip_path + ".backup_soilinstaller"
+
+    # Self-heal: older installer versions appended the soil layers on every run,
+    # leaving duplicate InfoLayer entries that corrupt the map. Re-base the i3d on
+    # the pristine backup ZIP so it is rebuilt with exactly one clean set of layers.
+    # This must run BEFORE we create a fresh backup, so we never re-base on a backup
+    # made from an already-duplicated ZIP.
+    if dupes:
+        if os.path.exists(bp):
+            log("WARNING", f"Found {dupes} duplicated soil layer(s) from a previous install — "
+                           f"rebuilding the i3d from the clean backup.")
+            with zipfile.ZipFile(bp, "r") as zbak:
+                bak_i3d = i3d_path if i3d_path in zbak.namelist() else find_i3d_path(zbak)
+                raw = zbak.read(bak_i3d).decode("utf-8-sig", errors="ignore")
+            missing = get_missing_layers(raw)
+        else:
+            log("WARNING", f"Found {dupes} duplicated soil layer(s) but no backup exists — "
+                           f"cannot auto-repair. Reinstall the map, then patch once.")
+
     if not os.path.exists(bp):
         shutil.copy2(zip_path, bp)
         log("INFO", f"Backup   : {os.path.basename(bp)}")
@@ -613,7 +661,7 @@ def run_installer_zip(sg, log, force=False):
         for layer in SOIL_LAYERS:
             n   = layer["name"]
             png = f"{data_dir}infoLayer_{n}.png"
-            good = (f'name="{n}"' in check) and (png in names)
+            good = (check.count(f'name="{n}"') == 1) and (png in names)
             log("INFO" if good else "ERROR", f"  [{'OK' if good else '!!'}] {n}")
             if not good:
                 ok = False
